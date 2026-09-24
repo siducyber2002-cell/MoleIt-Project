@@ -1,0 +1,535 @@
+/* ============================================================
+   Functional Groups page — v2 redesign.
+
+   Changes from the previous "premium SaaS" pass, in response to
+   feedback:
+   1) BUG FIX — body/html behind this page still used the app's dark
+      "lab" background (see index.css). Since the .fg-page canvas is
+      only as tall as its own content, that dark colour showed through
+      as a solid black band above the page (behind the slim TopBar
+      strip in App.jsx) and on mobile overscroll. Fixed the same way
+      GroupTheoryPage.css already fixes it for itself: toggle a
+      `fg-light-scroll` class onto <html>/<body> while this page is
+      mounted (see the useEffect in FunctionalGroupsPage.jsx) that
+      flattens them to this page's own background colour.
+   2) Toned down: the old canvas was near-white (#fbfbfd) with two big
+      50%-opacity blurred orbs washing over everything — read as
+      "too much light, low contrast". Background is now a deeper
+      neutral, text tones are darker, borders are firmer, and the
+      ambient glow is subtler.
+   3) The card's structure preview no longer sits under a printed
+      graph-paper grid — replaced with a plain soft tier-tinted panel.
+   4) The old hover panel was an absolute overlay that could climb up
+      and hide the whole structure diagram. Recognition info is now
+      always visible under the diagram, with an inline expand section
+      (grid-rows animation) that grows the card *downward* instead of
+      covering anything.
+   5) New ambient motif: a flowing animated gradient ribbon behind the
+      hero, replacing one of the old orbs.
+
+   Still scoped entirely under .fg-page so nothing leaks elsewhere.
+   ============================================================ */
+
+html.fg-light-scroll,
+body.fg-light-scroll {
+  background-color: #eef0f4 !important;
+  background-image: none !important;
+}
+
+.fg-page {
+  --fg-bg: #eef0f4;
+  --fg-surface: #ffffff;
+  --fg-border: #d7dbe3;
+  --fg-border-soft: #e3e6ec;
+  --fg-ink: #0a0c10;
+  --fg-ink-soft: #454b58;
+  --fg-ink-faint: #6b7280;
+
+  --fg-teal: #0d9488;
+  --fg-teal-soft: #0b6b62;
+  --fg-teal-tint: #dcf7f2;
+  --fg-violet: #6d28d9;
+  --fg-violet-tint: #ece3fd;
+  --fg-amber: #b45309;
+  --fg-amber-tint: #fdecd2;
+  --fg-rose: #be123c;
+  --fg-rose-tint: #fde2e7;
+
+  position: relative;
+  isolation: isolate;
+  min-height: 100%;
+  overflow-x: hidden;
+  background: var(--fg-bg);
+  color: var(--fg-ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.fg-page ::selection { background: var(--fg-teal); color: #fff; }
+
+/* ---------- ambient background ---------- */
+.fg-orbs {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.fg-orb {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(90px);
+  opacity: 0.32;
+}
+.fg-orb--violet {
+  top: -160px;
+  right: -160px;
+  width: 460px;
+  height: 460px;
+  background: radial-gradient(circle, rgba(109, 40, 217, 0.22), transparent 70%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .fg-orb { animation: fg-orb-drift 28s ease-in-out infinite alternate; }
+}
+@keyframes fg-orb-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(16px, 22px, 0) scale(1.05); }
+}
+
+/* Hero watermark: the ribbon sits full-bleed (edge-to-edge across the
+   viewport, via the same left/right/margin 100vw trick) directly
+   behind the eyebrow/title/lede/stats, which sit on top of it at a
+   higher z-index — the heading reads as printed over the ribbon
+   rather than the ribbon living in its own separate strip.
+   .fg-page (not this narrower content column) is what clips the
+   100vw bleed at the true page edge — see the overflow-x rule up top. */
+.fg-hero {
+  position: relative;
+}
+.fg-hero-ribbon {
+  position: absolute;
+  left: 50%;
+  top: 68%;
+  width: 100vw;
+  margin-left: -50vw;
+  transform: translateY(-50%);
+  z-index: 0;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 30%, black 55%, black 85%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, transparent 30%, black 55%, black 85%, transparent 100%);
+}
+.fg-hero-content {
+  position: relative;
+  z-index: 1;
+}
+
+.fg-content {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---------- type ---------- */
+.fg-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-teal-soft);
+}
+.fg-eyebrow-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--fg-teal);
+  box-shadow: 0 0 0 3px var(--fg-teal-tint);
+}
+.fg-h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.04;
+  color: var(--fg-ink);
+}
+.fg-h1-accent {
+  display: inline-block;
+  /* Small horizontal breathing room, offset by a matching negative
+     margin so the heading's own position/spacing don't shift: bold
+     display fonts often paint glyph ink (the curl of a 'G', the tail
+     of an 's') slightly past that letter's layout box, and with no
+     margin the gradient background stopped exactly at the box edge —
+     so that little sliver of ink had no gradient under it and read as
+     "cut off" on both the left and right ends of the word. */
+  padding: 0 0.05em;
+  margin: 0 -0.05em;
+  background: linear-gradient(100deg, var(--fg-teal) 0%, var(--fg-violet) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.fg-lede {
+  color: var(--fg-ink-soft);
+  line-height: 1.6;
+}
+
+/* ---------- stat chips ---------- */
+.fg-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--fg-border);
+  background: var(--fg-surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+}
+.fg-stat-value {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--fg-ink);
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.fg-stat-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--fg-ink-faint);
+}
+
+/* ---------- pill CTA ---------- */
+.fg-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 20px;
+  border-radius: 999px;
+  border: none;
+  background: linear-gradient(100deg, var(--fg-teal) 0%, #0e7490 100%);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 10px 22px -8px rgba(13, 148, 136, 0.6);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+}
+.fg-btn-primary:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+  box-shadow: 0 14px 26px -8px rgba(13, 148, 136, 0.65);
+}
+.fg-btn-primary:disabled {
+  opacity: 0.4;
+  box-shadow: none;
+  transform: none;
+}
+
+.fg-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--fg-border);
+  background: var(--fg-surface);
+  color: var(--fg-ink-soft);
+  font-size: 13px;
+  font-weight: 700;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+.fg-btn-ghost:hover {
+  border-color: var(--fg-teal);
+  color: var(--fg-teal-soft);
+  background: var(--fg-teal-tint);
+}
+
+/* ---------- search + segmented control ---------- */
+.fg-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px 10px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--fg-border);
+  background: var(--fg-surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.fg-search:focus-within {
+  border-color: var(--fg-teal);
+  box-shadow: 0 0 0 4px var(--fg-teal-tint);
+}
+.fg-search input {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13.5px;
+  color: var(--fg-ink);
+  width: 100%;
+}
+.fg-search input::placeholder { color: var(--fg-ink-faint); }
+
+.fg-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--fg-border);
+  background: #e2e5eb;
+}
+.fg-segmented button {
+  padding: 7px 16px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--fg-ink-faint);
+  transition: color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+.fg-segmented button.is-active {
+  background: var(--fg-surface);
+  color: var(--fg-ink);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18);
+}
+.fg-segmented button:not(.is-active):hover {
+  color: var(--fg-ink-soft);
+}
+
+/* ---------- card grid ---------- */
+@keyframes fg-card-rise {
+  0% { opacity: 0; transform: translateY(16px) scale(0.98); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+.fg-card-rise {
+  animation: fg-card-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Card height is intrinsic (auto) on purpose — the grid uses
+   items-start so rows aren't stretched to a shared height, letting an
+   expanded card grow independently of its neighbours. The two
+   `height: 100%` rules this replaced were leftover from the old
+   fixed-400px card design: against this auto-sized grid they resolved
+   inconsistently, clamping the box short while its flex-column
+   content (which grows on "More details") kept spilling out past that
+   clamped edge with the default overflow:visible — text leaking down
+   into the row below. overflow: hidden here is the actual fix: it
+   also gives the card a defined automatic minimum size, so it can
+   never render shorter than its own content again. */
+.fg-card {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-radius: 22px;
+  border: 1px solid var(--fg-border);
+  background: var(--fg-surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 18px 34px -22px rgba(15, 23, 42, 0.28);
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.3s ease, border-color 0.3s ease;
+}
+.fg-card:hover,
+.fg-card:focus-within {
+  transform: translateY(-3px);
+  border-color: var(--fg-ink-faint);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 26px 44px -20px rgba(15, 23, 42, 0.32);
+}
+
+/* Diagonal tier tag cut into the top-left corner — replaces the old
+   plain index number + separate badge pill. */
+.fg-card-tag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  padding: 9px 0 0 16px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: #fff;
+  width: 84px;
+  height: 34px;
+  clip-path: polygon(0 0, 100% 0, 30% 100%, 0 60%);
+}
+.fg-card-tag--core { background: linear-gradient(135deg, var(--fg-teal), #0e7490); }
+.fg-card-tag--advanced { background: linear-gradient(135deg, var(--fg-violet), #a21caf); }
+
+.fg-card-index {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 2;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--fg-ink-faint);
+  opacity: 0.65;
+}
+
+.fg-formula-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.fg-formula-pill--core { color: var(--fg-teal-soft); background: var(--fg-teal-tint); }
+.fg-formula-pill--advanced { color: var(--fg-violet); background: var(--fg-violet-tint); }
+
+/* Diagram panel — plain tier-tinted surface, no grid pattern. */
+.fg-preview-frame {
+  position: relative;
+  border-radius: 16px;
+  border: 1px solid var(--fg-border-soft);
+  overflow: hidden;
+}
+.fg-preview-frame--core {
+  background: radial-gradient(120% 140% at 20% 15%, var(--fg-teal-tint) 0%, #f7fbfa 55%, #f7fbfa 100%);
+}
+.fg-preview-frame--advanced {
+  background: radial-gradient(120% 140% at 20% 15%, var(--fg-violet-tint) 0%, #faf8fe 55%, #faf8fe 100%);
+}
+
+/* Always-visible teaser line under the diagram */
+.fg-teaser-label {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--fg-ink-faint);
+}
+.fg-teaser-text {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-ink-soft);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.fg-expand-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--fg-teal-soft);
+  transition: gap 0.2s ease;
+}
+.fg-expand-toggle:hover { gap: 7px; }
+.fg-expand-toggle svg { transition: transform 0.3s ease; }
+.fg-expand-toggle.is-open svg { transform: rotate(180deg); }
+
+/* Expand panel — plain max-height + overflow:hidden, not the
+   grid-template-rows(0fr/1fr) trick this replaced. That technique
+   nests a grid container inside a flex column (.fg-card), and a flex
+   item's own "automatic minimum size" defaults to its content's full
+   size unless overflow is hidden on that exact item — I'd only set
+   overflow:hidden on the inner grid item, not on .fg-expand itself
+   (the flex item), so some browsers kept reserving/painting a sliver
+   of the collapsed content below the card. max-height doesn't have
+   that nested-minimum-size ambiguity: closed is simply 0 and clipped,
+   full stop, consistently across browsers. 500px is just a generous
+   ceiling, comfortably above any real card's expanded content. */
+.fg-expand {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.fg-expand.is-open { max-height: 500px; }
+
+.fg-draw-lab-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--fg-border);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg-ink-soft);
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+.fg-draw-lab-btn:hover {
+  border-color: currentColor;
+  background: var(--fg-bg);
+}
+
+/* ---------- flashcards ---------- */
+.fg-flash-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #dde1e8;
+  overflow: hidden;
+}
+.fg-flash-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--fg-teal), var(--fg-violet));
+  transition: width 0.3s ease;
+}
+
+.fg-flash-card {
+  border-radius: 26px;
+  border: 1px solid var(--fg-border);
+  background: var(--fg-surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 26px 50px -24px rgba(15, 23, 42, 0.32);
+}
+.fg-flash-card--back {
+  border-color: rgba(13, 148, 136, 0.4);
+}
+
+.fg-answer-again {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(190, 18, 60, 0.3);
+  background: var(--fg-rose-tint);
+  color: var(--fg-rose);
+  font-size: 13px;
+  font-weight: 700;
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+.fg-answer-again:hover { filter: brightness(0.97); transform: translateY(-1px); }
+
+.fg-answer-good {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 22px;
+  border-radius: 999px;
+  border: none;
+  background: linear-gradient(100deg, var(--fg-teal), #0e7490);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 10px 22px -8px rgba(13, 148, 136, 0.55);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+.fg-answer-good:hover { filter: brightness(1.06); transform: translateY(-1px); }
+
+.fg-empty {
+  border-radius: 24px;
+  border: 1px dashed var(--fg-border);
+  background: var(--fg-surface);
+  color: var(--fg-ink-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fg-orb, .fg-card-rise, .fg-card { animation: none; transition: none; }
+}

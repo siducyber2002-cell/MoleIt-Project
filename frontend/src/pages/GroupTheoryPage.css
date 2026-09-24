@@ -1,0 +1,392 @@
+/* ============================================================
+   Group Theory page — standalone theme.
+   Scoped entirely under .gt-page so nothing here leaks into the
+   rest of the (still dark "lab") app. Swiss/editorial flat-card
+   look: warm paper background, thick ink borders, offset "sticker"
+   shadows instead of glow, big confident type.
+   ============================================================ */
+
+.gt-page {
+  --gt-paper: #f3ede2;
+  --gt-paper-soft: #ece4d4;
+  --gt-ink: #16191b;
+  --gt-ink-soft: #4b5257;
+  --gt-teal: #164f61;
+  --gt-teal-soft: #1f6479;
+  --gt-sky: #3cc6ef;
+  --gt-sky-soft: #bdeaf9;
+  --gt-orange: #f3a53c;
+  --gt-orange-soft: #fbdba0;
+  --gt-cream-text: #f2ede2;
+  --gt-line: var(--gt-ink);
+  --gt-shadow: 6px 6px 0 var(--gt-line);
+  --gt-shadow-sm: 4px 4px 0 var(--gt-line);
+
+  background: var(--gt-paper);
+  color: var(--gt-ink);
+  font-family: var(--font-body);
+}
+
+.gt-page ::selection { background: var(--gt-orange); color: var(--gt-ink); }
+
+/* Applied to <html>/<body> only while this page is mounted (see
+   GroupTheoryPage.jsx). Flattens the app's default dark "lab" body theme
+   to this page's paper-cream so nothing dark shows through around/behind
+   the page — mobile overscroll bounce, or side margins on very wide
+   screens. Restored automatically when the user navigates away. */
+html.gt-light-scroll,
+body.gt-light-scroll {
+  background-color: #f3ede2 !important;
+  background-image: none !important;
+}
+
+/* ---------- layout shells ---------- */
+.gt-section {
+  position: relative;
+  border: 2px solid var(--gt-line);
+  border-radius: 28px;
+  overflow: hidden;
+}
+.gt-section-paper { background: var(--gt-paper); }
+.gt-section-light {
+  background: #fffdf8;
+  color: var(--gt-ink);
+  box-shadow: var(--gt-shadow-sm);
+}
+.gt-section-teal {
+  background: var(--gt-teal);
+  color: var(--gt-cream-text);
+}
+
+.gt-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.gt-kicker-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1.5px solid currentColor;
+  font-size: 10px;
+}
+
+.gt-heading {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.02;
+}
+
+.gt-mark {
+  position: relative;
+  display: inline-block;
+  padding: 0 0.12em;
+  color: var(--gt-ink);
+  background-image: linear-gradient(var(--gt-orange), var(--gt-orange));
+  background-repeat: no-repeat;
+  background-size: 0% 100%;
+  background-position: left center;
+  animation: gt-mark-in 0.9s 0.35s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+@keyframes gt-mark-in {
+  to { background-size: 100% 100%; }
+}
+
+/* ---------- cards / panels ---------- */
+.gt-card {
+  background: #fffdf8;
+  border: 2px solid var(--gt-line);
+  border-radius: 18px;
+  box-shadow: var(--gt-shadow-sm);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.gt-card:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 var(--gt-line);
+}
+.gt-card-flat {
+  background: #fffdf8;
+  border: 2px solid var(--gt-line);
+  border-radius: 18px;
+}
+.gt-card-teal {
+  background: var(--gt-teal-soft);
+  color: var(--gt-cream-text);
+  border: 2px solid var(--gt-line);
+  border-radius: 18px;
+  box-shadow: var(--gt-shadow-sm);
+}
+/* ---------- buttons / chips ---------- */
+.gt-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 13.5px;
+  border: 2px solid var(--gt-line);
+  border-radius: 999px;
+  padding: 0.6em 1.1em;
+  background: var(--gt-ink);
+  color: var(--gt-paper);
+  box-shadow: var(--gt-shadow-sm);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.gt-btn:hover:not(:disabled) {
+  background: var(--gt-orange);
+  color: var(--gt-ink);
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 var(--gt-line);
+}
+.gt-btn:active:not(:disabled) {
+  transform: translate(0, 0);
+  box-shadow: 2px 2px 0 var(--gt-line);
+}
+.gt-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.gt-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12.5px;
+  border: 2px solid var(--gt-line);
+  border-radius: 999px;
+  padding: 0.5em 0.95em;
+  background: transparent;
+  color: inherit;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.gt-btn-ghost:hover { background: var(--gt-ink); color: var(--gt-paper); }
+
+.gt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1.5px solid var(--gt-line);
+  border-radius: 999px;
+  padding: 0.4em 0.85em;
+  background: #fffdf8;
+  transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.gt-chip:hover {
+  transform: translateY(-2px);
+  background: var(--gt-sky);
+}
+
+.gt-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 0.3em 0.7em;
+  border: 1.5px solid var(--gt-line);
+}
+
+/* ---------- form controls ---------- */
+.gt-input,
+.gt-textarea {
+  width: 100%;
+  border: 2px solid var(--gt-line);
+  border-radius: 12px;
+  background: #fffdf8;
+  color: var(--gt-ink);
+  font-family: var(--font-mono);
+  padding: 0.6em 0.8em;
+  outline: none;
+  transition: box-shadow 0.15s ease;
+}
+.gt-input:focus,
+.gt-textarea:focus {
+  box-shadow: 0 0 0 3px var(--gt-orange-soft);
+}
+.gt-textarea { resize: vertical; }
+
+.gt-range {
+  accent-color: var(--gt-orange);
+}
+
+.gt-tolerance-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-size: 12px;
+  font-weight: 600;
+  border: 2px solid var(--gt-line);
+  border-radius: 10px;
+  padding: 0.4em 0.6em;
+  background: #fffdf8;
+}
+.gt-tolerance-box input {
+  width: 56px;
+  border: none;
+  background: transparent;
+  color: var(--gt-ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+  -moz-appearance: textfield;
+}
+.gt-tolerance-box input::-webkit-outer-spin-button,
+.gt-tolerance-box input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ---------- live badge / status line ---------- */
+.gt-live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--gt-teal);
+  border: 1.5px solid var(--gt-teal);
+  border-radius: 999px;
+  padding: 0.3em 0.7em;
+  background: rgba(22, 79, 97, 0.08);
+}
+.gt-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--gt-teal);
+  box-shadow: 0 0 0 0 rgba(22, 79, 97, 0.6);
+  animation: gt-live-pulse 1.8s ease-out infinite;
+}
+@keyframes gt-live-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(22, 79, 97, 0.45); }
+  70% { box-shadow: 0 0 0 7px rgba(22, 79, 97, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(22, 79, 97, 0); }
+}
+.gt-status-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6em;
+  border-top: 1.5px dashed rgba(22, 25, 27, 0.3);
+  padding-top: 0.75em;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--gt-ink);
+  opacity: 0.85;
+}
+.gt-status-line .gt-live-dot { margin-top: 0.35em; flex-shrink: 0; }
+
+/* ---------- viewer card (the main attraction) ---------- */
+.gt-viewer-card { box-shadow: var(--gt-shadow); }
+
+/* ---------- hero graphic ---------- */
+.gt-hero-shape {
+  animation: gt-spin-slow 7s linear infinite;
+  transform-origin: 50% 50%;
+}
+@keyframes gt-spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.gt-hero-mirror {
+  animation: gt-mirror-flash 4.5s ease-in-out infinite;
+  transform-origin: 50% 50%;
+}
+@keyframes gt-mirror-flash {
+  0%, 55% { opacity: 0; }
+  75%, 90% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.gt-hero-diamond {
+  animation: gt-float 5.5s ease-in-out infinite;
+}
+@keyframes gt-float {
+  0%, 100% { transform: translateY(0) rotate(45deg); }
+  50% { transform: translateY(-10px) rotate(50deg); }
+}
+
+/* ---------- ticker ---------- */
+.gt-ticker-row { overflow: hidden; white-space: nowrap; }
+.gt-ticker-track {
+  display: inline-flex;
+  animation: gt-ticker 26s linear infinite;
+}
+.gt-ticker-row:hover .gt-ticker-track { animation-play-state: paused; }
+@keyframes gt-ticker {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* ---------- misc ---------- */
+.gt-divider { border-top: 2px dashed var(--gt-ink-soft); opacity: 0.5; }
+
+.gt-stat {
+  border: 2px solid var(--gt-line);
+  border-radius: 12px;
+  background: #fffdf8;
+  padding: 0.55em 0.75em;
+}
+
+.gt-op-btn {
+  border-left: 3px solid transparent;
+  border-radius: 8px;
+  background: var(--gt-paper-soft);
+  color: var(--gt-ink);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 0.25em 0.55em;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.gt-op-btn:hover { transform: translateY(-1px); background: var(--gt-sky-soft); }
+.gt-op-btn.is-active { background: var(--gt-ink); color: var(--gt-paper); }
+
+@media (prefers-reduced-motion: reduce) {
+  .gt-hero-shape, .gt-hero-mirror, .gt-hero-diamond, .gt-ticker-track, .gt-mark {
+    animation: none !important;
+  }
+  .gt-hero-mirror { opacity: 0.5; }
+  .gt-mark { background-size: 100% 100%; }
+}
+
+/* ==========================================================================
+   Logo on the cream page + phone / Android fit
+   ========================================================================== */
+
+/* The wordmark in the top bar is near-white for the dark theme — invisible on this cream page. */
+html.gt-light-scroll .moleit-logo--dark .text-lab-100 { color: var(--gt-ink, #16191b); }
+html.gt-light-scroll .moleit-logo--dark .moleit-logo-shimmer {
+  background-image: linear-gradient(100deg, #0891b2 0%, #7c3aed 50%, #0891b2 100%);
+  background-size: 200% 100%;
+}
+
+/* character table: keep the "Class" column pinned while the irreps scroll sideways */
+.gt-chartable-wrap { -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+.gt-chartable th:first-child,
+.gt-chartable td:first-child { position: sticky; left: 0; z-index: 1; background: var(--gt-card-bg, #fffdf8); }
+
+@media (max-width: 639px) {
+  /* 16px inputs: Android/iOS browsers zoom the page in when a smaller field is focused */
+  .gt-input, .gt-textarea, .gt-tolerance-box input { font-size: 16px; }
+  .gt-textarea { line-height: 1.45; }
+
+  /* comfortable touch targets */
+  .gt-chip { min-height: 36px; padding-top: 7px; padding-bottom: 7px; font-size: 12px; }
+  .gt-btn, .gt-btn-ghost { min-height: 44px; }
+  .gt-input { min-height: 44px; }
+  .gt-op-btn { min-height: 34px; padding: 6px 10px; font-size: 12px; }
+  .gt-tolerance-box { min-height: 44px; }
+}

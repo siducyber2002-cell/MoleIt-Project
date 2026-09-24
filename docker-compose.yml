@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: molapp_user
+      POSTGRES_PASSWORD: molapp_pass
+      POSTGRES_DB: molapp_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - molapp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U molapp_user -d molapp_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://molapp_user:molapp_pass@db:5432/molapp_db
+      SECRET_KEY: change_this_to_a_long_random_string
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+
+volumes:
+  molapp_pgdata:

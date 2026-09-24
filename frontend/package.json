@@ -1,0 +1,35 @@
+{
+  "name": "moleit",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "seed:quiz": "esbuild scripts/seedQuizQuestions.mjs --bundle --platform=node --format=esm --outfile=.tmp-seed-bundle.mjs && node .tmp-seed-bundle.mjs && node -e \"require('fs').unlinkSync('.tmp-seed-bundle.mjs')\""
+  },
+  "dependencies": {
+    "axios": "^1.19.0",
+    "framer-motion": "^13.2.0",
+    "lenis": "^1.3.26",
+    "lucide-react": "^1.38.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.2",
+    "three": "^0.186.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "autoprefixer": "^10.5.4",
+    "esbuild": "^0.28.0",
+    "oxlint": "^1.79.0",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.2.2"
+  }
+}

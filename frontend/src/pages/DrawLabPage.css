@@ -1,0 +1,109 @@
+/* frontend/src/pages/DrawLabPage.css
+ *
+ * Dark-theme atmosphere for the Draw Lab workspace — gives it the same
+ * "alive" quality as the redesigned light pages (ambient glow, gradient
+ * headline, a moving accent line) without touching the actual editor
+ * chrome underneath. Toolbar, AtomPalette, Inspector, PropertiesPanel,
+ * AutocorrectPanel and DrawCanvas are unchanged: this file only styles
+ * the page shell (header + panel frames) around them.
+ *
+ * Scoped under .dl-page so nothing here leaks into the rest of the
+ * (mostly light-themed) app, the same way .fg-page/.gt-page are scoped.
+ */
+
+.dl-page {
+  position: relative;
+  isolation: isolate;
+}
+
+/* Two very low-opacity blurred glows, same technique as the light
+   pages' .fg-orbs — kept faint enough here that they read as depth
+   behind the workspace rather than competing with it. */
+.dl-orbs {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.dl-orb {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(120px);
+  opacity: 0.14;
+}
+.dl-orb--phosphor {
+  top: -200px;
+  left: -160px;
+  width: 460px;
+  height: 460px;
+  background: radial-gradient(circle, rgba(94, 234, 212, 0.9), transparent 70%);
+}
+.dl-orb--violet {
+  top: -160px;
+  right: -180px;
+  width: 420px;
+  height: 420px;
+  background: radial-gradient(circle, rgba(167, 139, 250, 0.85), transparent 70%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dl-orb { animation: dl-orb-drift 26s ease-in-out infinite alternate; }
+  .dl-orb--violet { animation-duration: 31s; }
+}
+@keyframes dl-orb-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(14px, 16px, 0) scale(1.05); }
+}
+
+.dl-header {
+  position: relative;
+  z-index: 1;
+}
+
+/* A thin moving highlight under the header — a cheap, toolbar-friendly
+   stand-in for the flowing ribbon on the light pages. Full width, only
+   2px tall, so it reads as ambient life rather than a decoration that
+   competes for attention in a UI this dense with controls. */
+.dl-scanline {
+  position: relative;
+  z-index: 1;
+  height: 2px;
+  overflow: hidden;
+  background: var(--color-lab-800);
+}
+.dl-scanline::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  background: linear-gradient(90deg, transparent, var(--color-phosphor), var(--color-violet), transparent);
+  animation: dl-scan 5.5s ease-in-out infinite;
+}
+@keyframes dl-scan {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(380%); }
+}
+
+/* Panel frames (palette/canvas/3D asides) — same rounded border/fill as
+   before, plus a soft inner top highlight and a deeper drop shadow so
+   they read as raised glass sitting above the ambient glow instead of
+   a flat fill, matching the "lifted card" feel used elsewhere. */
+.dl-panel {
+  position: relative;
+  z-index: 1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 16px 32px -20px rgba(0, 0, 0, 0.65);
+}
+
+.dl-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dl-orb,
+  .dl-scanline::after {
+    animation: none;
+  }
+}

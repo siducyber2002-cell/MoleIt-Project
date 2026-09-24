@@ -1,0 +1,1098 @@
+/* ==========================================================================
+   Homepage theme — warm-paper canvas, charcoal ink, sky-blue "road" line,
+   orange highlighter. Everything is scoped under `.ix` (the homepage root)
+   or `html.theme-indisea` (set only while the homepage is mounted), so no
+   other page is affected.
+   ========================================================================== */
+
+/* Page canvas — also covers overscroll / rubber-band areas. */
+html.theme-indisea,
+html.theme-indisea body {
+  background-color: #f0edea;
+  background-image: none;
+}
+
+/* Custom cursor: hide the native one only while the dot is running. */
+html.ix-cursor,
+html.ix-cursor * {
+  cursor: none !important;
+}
+html.ix-menu-open {
+  overflow: hidden;
+}
+
+:root {
+  /* palette */
+  --ix-bg: #f0edea;
+  --ix-ink: #262626;
+  --ix-ink-2: #4e4e4d;
+  --ix-ink-3: #8a8681;
+  --ix-card: #fafaf9;
+  --ix-blue: #3bbff7;
+  --ix-orange: #eea02b;
+  --ix-green: #1f6d49;
+  --ix-line: rgba(38, 38, 38, 0.12);
+
+  /* geometry (desktop) — the road runs in the gutter at --ix-road-cx */
+  --ix-pad: clamp(20px, 3.95vw, 76px);
+  --ix-pad-l: var(--ix-pad);
+  --ix-road-cx: 30vw;
+  --ix-road-w: clamp(10px, 2.27vw, 42px);
+  --ix-corner: clamp(40px, 6.5vw, 130px);
+  --ix-gap: clamp(28px, 4.7vw, 88px);
+  --ix-ring-d: clamp(300px, 24vw, 430px);
+  --ix-end-d: clamp(150px, 13vw, 230px);
+  --ix-radius: clamp(16px, 1.6vw, 26px);
+}
+
+.ix {
+  /* Point every "display"/"mono" utility used inside the homepage at the
+     homepage typeface, without touching any other page. */
+  --font-display: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'Courier New', monospace;
+
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  overflow-x: clip;
+  background: var(--ix-bg);
+  color: var(--ix-ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (max-width: 1023px) {
+  :root {
+    --ix-road-cx: 16px;
+    --ix-road-w: 10px;
+    --ix-corner: 36px;
+    --ix-pad: 20px;
+    --ix-pad-l: 46px;
+    --ix-ring-d: min(300px, 74vw);
+    --ix-end-d: 130px;
+  }
+}
+
+.ix ::selection {
+  background: var(--ix-orange);
+  color: var(--ix-ink);
+}
+
+/* invisible ruler the road reads its gutter / thickness / corner radius from */
+.ix-probe {
+  position: absolute;
+  top: 0;
+  left: calc(var(--ix-road-cx) - var(--ix-road-w) / 2);
+  width: var(--ix-road-w);
+  height: var(--ix-corner);
+  visibility: hidden;
+  pointer-events: none;
+}
+.ix-road {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.ix-main {
+  position: relative;
+  z-index: 1;
+}
+/* zero-size markers the road snaps its horizontal runs to */
+.ix-run {
+  position: absolute;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+/* a zig-zag turn: set BOTH `top` (its y) and `left` (its x) inline wherever
+   you place one — unlike .ix-run, there's no default `left` here because
+   each bend needs its own x. Add as many as you like, in the order the
+   road should pass through them; drop the div and it's gone from the path. */
+.ix-bend {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+/* ---------- type ---------- */
+.ix-label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ix-ink-2);
+}
+.ix-h1,
+.ix-h2 {
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  color: var(--ix-ink);
+}
+.ix-h1 {
+  font-size: clamp(2.4rem, 4.7vw, 5.2rem);
+  line-height: 1.04;
+}
+.ix-h2 {
+  font-size: clamp(2.1rem, 3.9vw, 4.3rem);
+  line-height: 1.06;
+}
+.ix-statement {
+  font-size: clamp(1.4rem, 2.6vw, 2.75rem);
+  font-weight: 500;
+  line-height: 1.32;
+  letter-spacing: -0.012em;
+}
+.ix-body {
+  max-width: 34em;
+  font-size: clamp(1rem, 1.3vw, 1.3rem);
+  line-height: 1.6;
+  color: var(--ix-ink-2);
+}
+
+/* ---------- orange highlighter ---------- */
+.ix-mark {
+  color: inherit;
+  padding: 0 0.14em;
+  margin: 0 -0.02em;
+  border-radius: 0.11em;
+  background: linear-gradient(var(--ix-orange), var(--ix-orange)) no-repeat 0 0 / 0% 100%;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition: background-size 0.85s cubic-bezier(0.65, 0, 0.35, 1);
+}
+.ix-mark.is-on {
+  background-size: 100% 100%;
+}
+/* display-size variant: a tight, single-line chip like the hero's "host" */
+.ix-mark--chip {
+  display: inline-block;
+  line-height: 0.92;
+  padding: 0.02em 0.14em 0.04em;
+  border-radius: 0.09em;
+}
+
+/* ---------- section scaffolding ---------- */
+.ix-sec {
+  position: relative;
+  padding-top: clamp(84px, 14vh, 176px);
+}
+.ix-sec--wall {
+  padding-top: clamp(150px, 24vh, 250px);
+}
+.ix-sec__head {
+  padding: 0 var(--ix-pad) 0 var(--ix-pad-l);
+  margin-bottom: clamp(20px, 3.4vh, 34px);
+}
+.ix-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0 var(--ix-pad) 0 var(--ix-pad-l);
+}
+.ix-grid__label {
+  margin-bottom: 22px;
+}
+@media (min-width: 1024px) {
+  .ix-grid {
+    grid-template-columns: calc(var(--ix-road-cx) + var(--ix-gap) - var(--ix-pad)) minmax(0, 1fr);
+  }
+  .ix-grid__label {
+    margin-bottom: 0;
+    padding-top: 0.55em;
+  }
+  .ix-sec__head {
+    padding-left: var(--ix-pad);
+  }
+}
+.ix-stack > * + * {
+  margin-top: clamp(18px, 3vh, 32px);
+}
+
+/* ---------- hero ---------- */
+.ix-hero {
+  position: relative;
+  min-height: max(100svh, 680px);
+  padding: clamp(118px, 19vh, 190px) var(--ix-pad) clamp(70px, 11vh, 130px) var(--ix-pad-l);
+}
+.ix-hero__copy {
+  position: relative;
+  z-index: 2;
+}
+.ix-hero__tagline {
+  margin: clamp(28px, 5vh, 56px) 0 0;
+  max-width: 21em;
+  font-size: clamp(1.5rem, 3.05vw, 3.3rem);
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+.ix-scroll {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: clamp(28px, 6vh, 64px);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ix-ink);
+  text-decoration: none;
+}
+.ix-scroll svg {
+  animation: ix-bob 1.8s ease-in-out infinite;
+}
+@keyframes ix-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(4px); }
+}
+.ix-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--ix-ring-d);
+  height: var(--ix-ring-d);
+  margin: clamp(44px, 7vh, 72px) auto 0;
+}
+.ix-ring__orbit {
+  width: calc(100% - 2 * var(--ix-road-w) - 14px);
+  aspect-ratio: 1;
+}
+@media (min-width: 1024px) {
+  .ix-hero__copy {
+    max-width: 56vw;
+  }
+  .ix-ring {
+    position: absolute;
+    left: 75%;
+    top: clamp(70px, 10vh, 120px);
+    /* centre on 75% without a transform (the reveal animation owns transform) */
+    margin: 0 0 0 calc(var(--ix-ring-d) / -2);
+  }
+}
+
+/* ---------- buttons ---------- */
+.ix-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.95em 1.55em;
+  border: 2px solid var(--ix-ink);
+  border-radius: 999px;
+  background: var(--ix-ink);
+  color: #fafaf9;
+  font-size: clamp(14px, 1.15vw, 17px);
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+}
+.ix-btn:hover {
+  background: var(--ix-blue);
+  border-color: var(--ix-blue);
+  color: var(--ix-ink);
+}
+.ix-btn--ghost {
+  background: transparent;
+  color: var(--ix-ink);
+}
+.ix-btn--ghost:hover {
+  background: var(--ix-ink);
+  border-color: var(--ix-ink);
+  color: #fafaf9;
+}
+.ix-btn svg {
+  transition: transform 0.25s ease;
+}
+.ix-btn:hover svg {
+  transform: translateX(3px);
+}
+.ix-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ---------- cards ---------- */
+.ix-card {
+  background: var(--ix-card);
+  border-radius: var(--ix-radius);
+}
+.ix-panel {
+  background: var(--ix-card);
+  border-radius: var(--ix-radius);
+  padding: clamp(16px, 1.8vw, 28px);
+}
+.ix-cards {
+  display: grid;
+  gap: clamp(12px, 1.6vw, 24px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0 var(--ix-pad) 0 var(--ix-pad-l);
+}
+@media (min-width: 1100px) {
+  .ix-cards {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    padding-left: var(--ix-pad);
+  }
+}
+@media (max-width: 520px) {
+  .ix-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.ix-feature {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: clamp(240px, 24vw, 340px);
+  padding: clamp(20px, 2vw, 32px);
+  background: var(--ix-card);
+  border-radius: var(--ix-radius);
+  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.3s ease;
+}
+.ix-feature:hover {
+  transform: translateY(-6px);
+  background: #fff;
+}
+.ix-feature__num {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ix-ink-3);
+}
+.ix-feature__icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--ix-bg);
+  color: var(--ix-ink);
+  transition: background-color 0.3s ease;
+}
+.ix-feature:hover .ix-feature__icon {
+  background: var(--ix-blue);
+}
+.ix-feature__title {
+  margin: clamp(22px, 4vh, 44px) 0 0;
+  font-size: clamp(1.4rem, 2vw, 2.1rem);
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+}
+.ix-feature__desc {
+  margin: 14px 0 0;
+  font-size: clamp(0.9rem, 1vw, 1.05rem);
+  line-height: 1.55;
+  color: var(--ix-ink-2);
+}
+.ix-feature__cta {
+  margin-top: auto;
+  padding-top: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ix-ink);
+  text-decoration: none;
+}
+.ix-feature__cta svg {
+  transition: transform 0.25s ease;
+}
+.ix-feature:hover .ix-feature__cta svg {
+  transform: translateX(4px);
+}
+.ix-stats {
+  display: grid;
+  gap: clamp(12px, 1.6vw, 24px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0 var(--ix-pad) 0 var(--ix-pad-l);
+  margin-top: clamp(12px, 1.6vw, 24px);
+}
+@media (min-width: 1100px) {
+  .ix-stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    padding-left: var(--ix-pad);
+  }
+}
+.ix-stat {
+  padding: clamp(18px, 2vw, 32px);
+  background: var(--ix-card);
+  border-radius: var(--ix-radius);
+}
+.ix-stat__num {
+  font-size: clamp(2.4rem, 5.2vw, 5.6rem);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+.ix-stat__label {
+  margin-top: clamp(10px, 1.6vw, 22px);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ix-ink-3);
+}
+
+/* ---------- floating chips around the 3D molecule ---------- */
+.ix-chip {
+  display: flex;
+  align-items: center;
+  gap: clamp(0.5rem, 1vw, 0.8rem);
+  padding: clamp(0.5rem, 1vw, 0.75rem) clamp(0.7rem, 1.3vw, 1rem);
+  background: var(--ix-card);
+  border-radius: 18px;
+  box-shadow: 0 14px 34px -14px rgba(38, 38, 38, 0.35), 0 0 0 1px rgba(38, 38, 38, 0.06);
+  text-decoration: none;
+  color: var(--ix-ink);
+}
+.ix-chip__icon {
+  display: grid;
+  place-items: center;
+  padding: 0.4rem;
+  border-radius: 12px;
+}
+.ix-chip__title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: clamp(12px, 1.1vw, 15px);
+  font-weight: 600;
+}
+.ix-chip__sub {
+  margin: 2px 0 0;
+  font-size: clamp(10px, 0.9vw, 12px);
+  color: var(--ix-ink-3);
+}
+.ix-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ix-orange);
+  animation: ix-pulse 2s infinite;
+}
+@keyframes ix-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(238, 160, 43, 0.5); }
+  70% { box-shadow: 0 0 0 8px rgba(238, 160, 43, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(238, 160, 43, 0); }
+}
+.ix-credit {
+  font-family: var(--font-mono);
+  font-size: clamp(11px, 0.95vw, 13px);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background-image: linear-gradient(100deg, #8a8681 30%, var(--ix-blue) 44%, var(--ix-ink) 50%, var(--ix-blue) 56%, #8a8681 70%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: ix-shimmer 4.5s linear infinite;
+}
+@keyframes ix-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.ix-avatar {
+  display: grid;
+  place-items: center;
+  width: clamp(2rem, 2.8vw, 2.7rem);
+  height: clamp(2rem, 2.8vw, 2.7rem);
+  border: 2px solid var(--ix-bg);
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-size: clamp(10px, 0.85vw, 13px);
+  font-weight: 600;
+}
+
+/* ---------- spectroscopy ---------- */
+.ix-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0.55em 1em;
+  border: 2px solid var(--ix-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ix-ink-2);
+  font: 600 clamp(13px, 1.05vw, 15px) / 1 var(--font-body);
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+.ix-tab:hover {
+  border-color: var(--ix-ink);
+  color: var(--ix-ink);
+}
+.ix-tab.is-active {
+  background: var(--ix-ink);
+  border-color: var(--ix-ink);
+  color: #fafaf9;
+}
+.ix-new {
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--ix-orange);
+  color: var(--ix-ink);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  vertical-align: 1px;
+}
+.dial-sweep { transform-origin: 50px 50px; animation: ix-dial-spin 2.4s linear infinite; }
+.dial-pulse { transform-origin: 50px 50px; animation: ix-dial-pulse 1.6s ease-in-out infinite; }
+@keyframes ix-dial-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes ix-dial-pulse { 0%, 100% { opacity: 0.45; transform: scale(1); } 50% { opacity: 1; transform: scale(1.3); } }
+
+/* ---------- finale ---------- */
+.ix-finale__end {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+  padding: 0 var(--ix-pad) clamp(36px, 6vh, 64px) var(--ix-pad-l);
+  margin-top: clamp(70px, 12vh, 140px);
+}
+.ix-endring {
+  width: var(--ix-end-d);
+  height: var(--ix-end-d);
+  margin: calc(var(--ix-corner) + 36px) auto 0;
+}
+.ix-road-credit {
+  margin: 0 auto;
+  max-width: 280px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ix-ink-2);
+}
+.ix-road-credit strong {
+  color: var(--ix-ink);
+  font-weight: 700;
+}
+.ix-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.ix-footer__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 22px;
+  font-size: 13px;
+  color: var(--ix-ink-2);
+}
+.ix-footer__row a,
+.ix-footer__row button {
+  color: var(--ix-ink);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+}
+@media (min-width: 1024px) {
+  .ix-finale__end {
+    flex-direction: row;
+    align-items: flex-end;
+    min-height: calc(var(--ix-end-d) + var(--ix-corner) + 130px);
+    padding-left: var(--ix-pad);
+  }
+  .ix-endring {
+    position: absolute;
+    left: 75%;
+    top: calc(var(--ix-corner) + 36px);
+    margin: 0 0 0 calc(var(--ix-end-d) / -2);
+  }
+  .ix-road-credit {
+    position: absolute;
+    left: 75%;
+    top: calc(var(--ix-corner) + 36px + var(--ix-end-d) + 14px);
+    width: 220px;
+    margin: 0 0 0 calc(220px / -2);
+  }
+}
+
+/* ---------- symmetry-lab section (left-aligned, breaks from .ix-grid) ---------- */
+.ix-symlab {
+  /* left/right padding only — a shorthand `padding: 0 … 0 …` here was
+     zeroing out the padding-top every other .ix-sec gets (clamp(84px,
+     14vh, 176px)), since this rule comes later in the file and wins the
+     cascade on equal specificity. That's what collapsed the gap between
+     section 6 (stats) and this section's "07" header, letting the road
+     line/decoration from the section above sit right on top of the label
+     instead of in the intended whitespace. */
+  padding-left: var(--ix-pad-l);
+  padding-right: var(--ix-pad);
+}
+.ix-symlab__head {
+  max-width: 40em;
+}
+
+/* ---------- reason stack (overlapping scroll cards) ---------- */
+.ix-stack {
+  position: relative;
+}
+.ix-stack__card {
+  position: sticky;
+  top: calc(clamp(56px, 8vh, 92px) + var(--i) * clamp(10px, 1.6vh, 16px));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(20px, 4vh, 40px);
+  min-height: clamp(340px, 50vh, 520px);
+  margin-bottom: clamp(14px, 2.2vh, 24px);
+  padding: clamp(26px, 3.4vw, 52px);
+  border-radius: var(--ix-radius);
+  overflow: hidden;
+  color: #fafaf9;
+  box-shadow: 0 32px 60px -28px rgba(38, 38, 38, 0.4), 0 0 0 1px rgba(38, 38, 38, 0.05);
+}
+.ix-stack__card:last-child {
+  margin-bottom: 0;
+}
+@media (min-width: 760px) {
+  .ix-stack__card {
+    grid-template-columns: 1.15fr 0.85fr;
+  }
+}
+.ix-stack__text {
+  position: relative;
+  z-index: 2;
+}
+.ix-stack__reason {
+  display: inline-block;
+  margin-bottom: clamp(14px, 2.4vh, 22px);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+.ix-stack__heading {
+  margin: 0;
+  font-size: clamp(1.7rem, 3vw, 2.7rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+.ix-stack__desc {
+  max-width: 34em;
+  margin: clamp(14px, 2.2vh, 20px) 0 0;
+  font-size: clamp(0.95rem, 1.1vw, 1.1rem);
+  line-height: 1.6;
+  opacity: 0.88;
+}
+.ix-stack__cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: clamp(20px, 3vh, 32px);
+  padding: 0.85em 1.4em;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  font-size: clamp(13px, 1vw, 15px);
+  font-weight: 600;
+  text-decoration: none;
+  color: inherit;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+.ix-stack__cta:hover {
+  transform: translateX(3px);
+  opacity: 0.85;
+}
+.ix-stack__graphic {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: clamp(180px, 26vh, 280px);
+}
+.ix-stack__graphic::before {
+  content: '';
+  position: absolute;
+  inset: -12%;
+  background: radial-gradient(closest-side, rgba(255, 255, 255, 0.14), transparent 72%);
+  pointer-events: none;
+}
+.ix-stack__num {
+  position: relative;
+  z-index: 1;
+  display: block;
+  font-family: var(--font-display);
+  font-size: clamp(8rem, 16vw, 14rem);
+  font-weight: 800;
+  line-height: 0.8;
+  letter-spacing: -0.05em;
+  color: #fafaf9;
+}
+@media (max-width: 759px) {
+  .ix-stack__graphic {
+    min-height: 130px;
+  }
+  .ix-stack__num {
+    font-size: clamp(5.5rem, 26vw, 8rem);
+  }
+}
+
+/* ---------- cursor dot ---------- */
+.ix-dot {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 200;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #fff;
+  mix-blend-mode: difference;
+  pointer-events: none;
+  opacity: 0;
+  transition: width 0.28s cubic-bezier(0.16, 1, 0.3, 1), height 0.28s cubic-bezier(0.16, 1, 0.3, 1),
+    margin 0.28s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, opacity 0.25s ease;
+  will-change: transform;
+}
+.ix-dot.is-link {
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  background: transparent;
+}
+.ix-dot.is-down {
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+}
+
+/* Menu pointer: same look, but above the full-screen menu (z 100) and the
+   open Close button (z 110). Native cursor is hidden only while it runs. */
+.ix-dot--menu {
+  z-index: 300;
+}
+html.ix-menu-cursor .ix-menu,
+html.ix-menu-cursor .ix-menu *,
+html.ix-menu-cursor .ix-burger.is-open,
+html.ix-menu-cursor .ix-burger.is-open * {
+  cursor: none !important;
+}
+
+/* ---------- site menu: "Menu" button + full-screen menu (every page) ---------- */
+.ix-burger,
+.ix-menu {
+  --font-display: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+}
+.ix-burger {
+  position: fixed;
+  top: clamp(16px, 1.55vw, 28px);
+  right: var(--ix-pad);
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.ix-burger.is-open {
+  z-index: 110;
+}
+.ix-burger__label {
+  min-width: 3.7em;
+  text-align: right;
+}
+.ix-burger__circle {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+/* a short "click me" ripple when the page first loads */
+.ix-burger__circle::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  animation: ix-hint 1.8s ease-out 1.6s 3;
+}
+@keyframes ix-hint {
+  0% { transform: scale(1); opacity: 0.55; }
+  100% { transform: scale(1.7); opacity: 0; }
+}
+.ix-burger__bars {
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 10px;
+}
+.ix-burger__bars i {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), top 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.ix-burger__bars i:nth-child(1) { top: 0; }
+.ix-burger__bars i:nth-child(2) { top: 8px; }
+.ix-burger.is-open .ix-burger__bars i:nth-child(1) { top: 4px; transform: rotate(45deg); }
+.ix-burger.is-open .ix-burger__bars i:nth-child(2) { top: 4px; transform: rotate(-45deg); }
+
+/* homepage: ink on paper; difference-blend flips it to light over the dark video */
+.ix-burger--home {
+  mix-blend-mode: difference;
+}
+
+/* inner pages: solid dark pill — reads on the dark lab pages and the light Group Theory page */
+.ix-burger--dark,
+.ix-burger--compact {
+  top: 13px;
+  right: 16px;
+  gap: 10px;
+  height: 44px;
+  padding: 0 5px 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(10, 14, 15, 0.9);
+  box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+.ix-burger--dark:hover,
+.ix-burger--compact:hover {
+  border-color: rgba(94, 234, 212, 0.55);
+}
+.ix-burger--dark .ix-burger__circle,
+.ix-burger--compact .ix-burger__circle {
+  width: 34px;
+  height: 34px;
+  border-width: 1.5px;
+}
+.ix-burger--dark.is-open,
+.ix-burger--compact.is-open {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.3);
+  box-shadow: none;
+}
+/* Draw Lab: fits inside its 57px header */
+.ix-burger--compact {
+  top: 10px;
+  right: 14px;
+  height: 36px;
+  padding: 0 4px 0 13px;
+  font-size: 11px;
+}
+.ix-burger--compact .ix-burger__circle {
+  width: 28px;
+  height: 28px;
+}
+.ix-burger--compact .ix-burger__bars {
+  width: 14px;
+  height: 8px;
+}
+.ix-burger--compact .ix-burger__bars i:nth-child(2) { top: 6px; }
+.ix-burger--compact.is-open .ix-burger__bars i:nth-child(1),
+.ix-burger--compact.is-open .ix-burger__bars i:nth-child(2) { top: 3px; }
+
+.ix-menu {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: clamp(14px, 1.4vw, 26px) var(--ix-pad) clamp(22px, 3.6vh, 40px);
+  background: var(--ix-ink);
+  color: var(--ix-bg);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ix-menu__top {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+}
+.ix-menu__list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0 clamp(24px, 4vw, 72px);
+  margin: clamp(18px, 4.5vh, 52px) 0;
+  padding: 0;
+  list-style: none;
+}
+@media (min-width: 900px) {
+  .ix-menu__list {
+    grid-auto-flow: column;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: repeat(6, auto);
+  }
+}
+.ix-menu__link {
+  display: flex;
+  align-items: baseline;
+  gap: clamp(10px, 1.2vw, 18px);
+  padding: clamp(2px, 0.55vh, 8px) 0;
+  color: var(--ix-bg);
+  font-size: clamp(1.75rem, 3.5vw, 3.5rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  text-decoration: none;
+}
+.ix-menu__link sup {
+  flex: 0 0 auto;
+  min-width: 1.6em;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ix-blue);
+  position: relative;
+  top: -0.55em;
+}
+.ix-menu__label {
+  border-radius: 0.11em;
+  padding: 0 0.12em;
+  margin: 0 -0.12em;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.ix-menu__hint {
+  display: none;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: rgba(240, 237, 234, 0.5);
+}
+@media (min-width: 640px) {
+  .ix-menu__hint {
+    display: inline;
+  }
+}
+.ix-menu__link:hover .ix-menu__label,
+.ix-menu__link:focus-visible .ix-menu__label,
+.ix-menu__link[aria-current='page'] .ix-menu__label {
+  background: var(--ix-orange);
+  color: var(--ix-ink);
+}
+.ix-menu__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px 30px;
+  font-size: 14px;
+  color: rgba(240, 237, 234, 0.7);
+}
+.ix-menu__foot button,
+.ix-menu__foot a {
+  color: var(--ix-bg);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+  cursor: pointer;
+}
+.ix-menu__auth {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.ix-menu__who {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ix-bg);
+  font-weight: 500;
+}
+.ix-menu__who b {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--ix-blue);
+  color: var(--ix-ink);
+  font-size: 11px;
+}
+
+/* ---------- small screens ---------- */
+@media (max-width: 767px) {
+  /* a tight single-line chip can't wrap; let the marker wrap like normal text */
+  .ix-mark--chip {
+    display: inline;
+    line-height: inherit;
+    padding: 0 0.12em;
+  }
+  .ix-h1,
+  .ix-h2 {
+    line-height: 1.14;
+  }
+  .ix-finale__end {
+    padding-top: 8px;
+  }
+}
+@media (max-width: 640px) {
+  .ix-chip {
+    gap: 6px;
+    padding: 6px 9px;
+    border-radius: 14px;
+  }
+  .ix-chip__icon {
+    padding: 0.3rem;
+    border-radius: 10px;
+  }
+  .ix-chip__icon svg {
+    width: 16px;
+    height: 16px;
+  }
+  .ix-chip__title {
+    font-size: 11.5px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ix-scroll svg,
+  .ix-burger__circle::after,
+  .ix-pulse,
+  .ix-credit,
+  .dial-sweep,
+  .dial-pulse {
+    animation: none;
+  }
+  .ix-mark {
+    transition: none;
+  }
+}

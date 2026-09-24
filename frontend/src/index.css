@@ -1,0 +1,237 @@
+@import "tailwindcss";
+
+@theme {
+  --color-lab-950: #0a0e0f;
+  --color-lab-900: #10161a;
+  --color-lab-850: #141c21;
+  --color-lab-800: #1a242a;
+  --color-lab-700: #263239;
+  --color-lab-600: #384750;
+  --color-lab-500: #566772;
+  --color-lab-400: #869499;
+  --color-lab-300: #b6bfc2;
+  --color-lab-100: #eef2f2;
+
+  --color-phosphor: #5eead4;
+  --color-phosphor-dim: #2dd4bf;
+  --color-amber: #f5a524;
+  --color-coral: #fb7185;
+  --color-violet: #a78bfa;
+
+  --font-display: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+  --font-body: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Courier New', monospace;
+}
+
+html, body, #root { height: 100%; }
+
+/* Full-screen homepage sections — see FullScreenSection.jsx / useSnapScroll.js.
+   Scoped to the "snap-scroll-y" class so it only ever applies on "/". Uses
+   "proximity" (a soft pull), never "mandatory", so it never fights the
+   user's scroll wheel, trackpad momentum, or the Lenis smooth-scroll
+   already running on the homepage. */
+html.snap-scroll-y {
+  scroll-snap-type: y proximity;
+}
+.snap-section {
+  scroll-snap-align: center;
+  scroll-snap-stop: normal;
+}
+@media (prefers-reduced-motion: reduce) {
+  html.snap-scroll-y {
+    scroll-snap-type: none;
+  }
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-lab-950);
+  background-image:
+    radial-gradient(ellipse 900px 600px at 8% 15%, rgba(34, 211, 238, 0.05), transparent 60%),
+    radial-gradient(ellipse 900px 650px at 92% 5%, rgba(167, 139, 250, 0.06), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 50% 100%, rgba(94, 234, 212, 0.035), transparent 65%),
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.025) 1px, transparent 0);
+  background-size: auto, auto, auto, 34px 34px;
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+  background-attachment: fixed, fixed, fixed, fixed;
+  color: var(--color-lab-100);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: var(--color-phosphor); color: var(--color-lab-950); }
+
+* { scrollbar-width: thin; scrollbar-color: var(--color-lab-600) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: var(--color-lab-600); border-radius: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+.grid-paper {
+  background-image:
+    linear-gradient(rgba(94, 234, 212, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(94, 234, 212, 0.06) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.font-display { font-family: var(--font-display); }
+.font-mono { font-family: var(--font-mono); }
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(94, 234, 212, 0.4); }
+  70% { box-shadow: 0 0 0 8px rgba(94, 234, 212, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(94, 234, 212, 0); }
+}
+.pulse-ring { animation: pulse-ring 2s infinite; }
+
+@keyframes warn-pulse-svg {
+  0% { opacity: 0.35; stroke-width: 1.5; }
+  50% { opacity: 0.9; stroke-width: 2.25; }
+  100% { opacity: 0.35; stroke-width: 1.5; }
+}
+.warn-pulse-svg { animation: warn-pulse-svg 1.4s ease-in-out infinite; transform-origin: center; }
+
+@keyframes flash-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes spectrum-peak {
+  0%, 100% { transform: scaleY(0.62); opacity: 0.6; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
+.spectrum-peak {
+  animation: spectrum-peak 2.4s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: bottom;
+}
+
+@keyframes spectrum-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(340%); }
+}
+.spectrum-sweep { animation: spectrum-sweep 3.2s linear infinite; }
+
+@keyframes ir-draw {
+  0% { stroke-dashoffset: 1; opacity: 0.5; }
+  50% { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: -1; opacity: 0.5; }
+}
+.ir-draw {
+  stroke-dasharray: 1;
+  animation: ir-draw 3.2s ease-in-out infinite;
+}
+
+.flash-line {
+  background-image: linear-gradient(
+    100deg,
+    var(--color-lab-500) 30%,
+    var(--color-phosphor) 45%,
+    #ffffff 50%,
+    var(--color-phosphor) 55%,
+    var(--color-lab-500) 70%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: flash-shimmer 4s linear infinite;
+}
+
+/* --- Quiz page: interactive feedback --- */
+@keyframes quiz-shake {
+  10%, 90% { transform: translateX(-1px); }
+  20%, 80% { transform: translateX(2px); }
+  30%, 50%, 70% { transform: translateX(-4px); }
+  40%, 60% { transform: translateX(4px); }
+}
+.quiz-shake { animation: quiz-shake 0.5s cubic-bezier(.36,.07,.19,.97) both; }
+
+@keyframes quiz-pop-in {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.quiz-pop-in { animation: quiz-pop-in 0.35s cubic-bezier(.34,1.56,.64,1) both; }
+
+@keyframes quiz-confetti-fall {
+  0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(160px) rotate(540deg); opacity: 0; }
+}
+.quiz-confetti-piece { animation: quiz-confetti-fall 1.1s ease-in forwards; }
+
+@keyframes quiz-float-up {
+  0% { transform: translateY(0); opacity: 0; }
+  15% { opacity: 1; }
+  100% { transform: translateY(-36px); opacity: 0; }
+}
+.quiz-float-up { animation: quiz-float-up 1s ease-out forwards; }
+
+@keyframes quiz-glow-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.quiz-glow-pulse { animation: quiz-glow-pulse 2.4s ease-in-out infinite; }
+
+@keyframes quiz-count-ring {
+  from { stroke-dashoffset: var(--ring-from, 0); }
+  to { stroke-dashoffset: var(--ring-to, 0); }
+}
+
+/* --- Draw Lab header: animated title underline --- */
+@keyframes title-underline {
+  0% { transform: scaleX(0); opacity: 0; }
+  60% { opacity: 1; }
+  100% { transform: scaleX(1); opacity: 1; }
+}
+.title-underline {
+  animation: title-underline 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+}
+
+/* --- Reactions hero: two-row "card train" marquee ---
+   Each row renders its cards twice back-to-back and slides the whole
+   track by -50%, which loops seamlessly. The two rows run opposite
+   directions so they visually cross. Hover pauses whichever row the
+   pointer is over so a card can be read/clicked comfortably. */
+@keyframes marquee-left {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+@keyframes marquee-right {
+  0% { transform: translateX(-50%); }
+  100% { transform: translateX(0); }
+}
+.marquee-track-left {
+  animation: marquee-left var(--marquee-duration, 32s) linear infinite;
+}
+.marquee-track-right {
+  animation: marquee-right var(--marquee-duration, 36s) linear infinite;
+}
+.marquee-row:hover .marquee-track-left,
+.marquee-row:hover .marquee-track-right {
+  animation-play-state: paused;
+}
+
+/* --- GlitchText: per-character "decrypting" reveal ---
+   The still-scrambling characters get their own solid neon color
+   (overriding the inherited transparent color of a gradient/
+   bg-clip-text heading) plus a quick flicker, while resolved
+   characters fall through to the parent's normal styling — so a
+   gradient headline keeps its gradient once the text clears. */
+@keyframes glitch-dud-flicker {
+  0%, 100% { opacity: 1; transform: translateY(0); }
+  20% { opacity: 0.55; transform: translateY(-1px); }
+  40% { opacity: 1; transform: translateX(1px); }
+  60% { opacity: 0.65; transform: translateX(-1px); }
+  80% { opacity: 1; transform: translateY(1px); }
+}
+.glitch-dud {
+  display: inline-block;
+  color: #67e8f9;
+  text-shadow: 0 0 6px rgba(103, 232, 249, 0.85), 0 0 14px rgba(217, 70, 239, 0.55);
+  animation: glitch-dud-flicker 0.12s steps(2) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .title-underline { animation: none; }
+  .marquee-track-left, .marquee-track-right { animation: none; }
+  .glitch-dud { animation: none; text-shadow: none; color: inherit; }
+}
