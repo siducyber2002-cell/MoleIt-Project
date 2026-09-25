@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowDown, Sparkles } from 'lucide-react';
 import { categoryTone, Formula } from './CompoundCard';
+import { isLowPowerDevice } from '../../lib/perfTier';
 
 // ---------------------------------------------------------------------------
 // Orbiting compound cards
@@ -282,29 +283,36 @@ export default function CompoundOrbitHero({ compounds = [] }) {
   const mouseRef = useRef({ x: 0, y: 0 });
 
   // Fixed once on mount so the mousemove-driven re-renders below don't keep
-  // reshuffling the bubbles.
+  // reshuffling the bubbles. Counts are halved on phones/tablets — every
+  // bubble is its own independently-animating, box-shadowed element, and
+  // `lib-flood` (below) keeps all of them running fixed over the *entire*
+  // Library page, not just this hero, for as long as it's mounted. That
+  // combination is what was quietly taxing every scroll frame on Android
+  // long after the user had scrolled past the hero itself; a laptop GPU
+  // shrugs off 40 of these, a phone GPU doesn't.
+  const lowPower = useMemo(() => isLowPowerDevice(), []);
   const bubbles = useMemo(
     () =>
-      Array.from({ length: 14 }, (_, i) => ({
+      Array.from({ length: lowPower ? 7 : 14 }, (_, i) => ({
         id: i,
         left: 4 + Math.random() * 92,
         size: 4 + Math.random() * 9,
         duration: 9 + Math.random() * 10,
         delay: -Math.random() * 18,
       })),
-    []
+    [lowPower]
   );
 
   const floodBubbles = useMemo(
     () =>
-      Array.from({ length: 26 }, (_, i) => ({
+      Array.from({ length: lowPower ? 10 : 26 }, (_, i) => ({
         id: i,
         left: 2 + Math.random() * 96,
         size: 5 + Math.random() * 12,
         duration: 12 + Math.random() * 14,
         delay: -Math.random() * 26,
       })),
-    []
+    [lowPower]
   );
 
   // The parallax offset lives in a plain ref, not state — this tick counter
@@ -817,6 +825,19 @@ export default function CompoundOrbitHero({ compounds = [] }) {
           .card-drift, .bubble, .lib-wave, .lib-caustic, .lib-bubble, .lp-core, .lp-drop { animation: none; }
           .tank-back, .tank-liquid, .tank-shell, .tank-rail, .lp, .lp-stream { display: none; }
           .lib-rise { animation: none; transform: translateY(-72px); }
+        }
+
+        /* Touch devices: .lib-flood is fixed/full-viewport (position: fixed; inset: 0) and
+           keeps animating two 60vw gradient blobs plus every flood bubble
+           for as long as the Library page is open — including while the
+           user has scrolled well past this hero into the grid below. On
+           a laptop that's cheap; on a phone GPU it's a steady background
+           frame cost stacked on top of whatever the visible page is
+           doing. Slowed and shrunk here rather than removed, so the
+           ambient effect survives, just at a size a phone can sustain. */
+        @media (pointer: coarse) {
+          .lib-caustic { width: 40vw; height: 40vw; animation-duration: 40s; }
+          .lib-caustic-b { animation-duration: 46s; }
         }
       `}</style>
     </div>

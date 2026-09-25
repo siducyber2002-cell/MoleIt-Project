@@ -80,6 +80,18 @@ export default function DrawCanvas({
   onSelectionChange,
 }) {
   const svgRef = useRef(null);
+  // Coalesces pointermove-driven state updates to one per animation frame.
+  // Without this, `handleSvgMouseMove` below (setState + O(atoms)/O(bonds)
+  // hit-testing) ran once per native pointermove event — on a desktop mouse
+  // that's already roughly frame-rate, but Android's touch layer samples
+  // pointermove far more often than the screen can even redraw, so every
+  // drag/hover on a phone was queuing up several React re-renders per
+  // frame. Capping it here to `requestAnimationFrame` makes this handler
+  // (and the window-level pan handler further down) actually run at the
+  // display's frame rate on every device, not just fast desktops.
+  const pendingSvgMove = useRef(null);
+  const svgMoveRaf = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(svgMoveRaf.current), []);
   const [dragBondFrom, setDragBondFrom] = useState(null);
   const [dragBondPos, setDragBondPos] = useState(null);
   const [hoverAtom, setHoverAtom] = useState(null);
@@ -223,14 +235,28 @@ export default function DrawCanvas({
   // a drag-based tool like this needs pointer events to work on a phone.
   useEffect(() => {
     if (!isPanning) return;
+    // Same one-update-per-frame coalescing as handleSvgMouseMove — this
+    // listens on `window` (so a fast pan drag that leaves the canvas
+    // doesn't get stuck), which means it also sees every native
+    // pointermove sample directly, unthrottled by React's own batching.
+    let raf = 0;
+    let pending = null;
     const move = (e) => {
       if (!panStart.current) return;
-      setPan({
-        x: panStart.current.panX + (e.clientX - panStart.current.x),
-        y: panStart.current.panY + (e.clientY - panStart.current.y),
+      pending = { clientX: e.clientX, clientY: e.clientY };
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (!pending || !panStart.current) return;
+        setPan({
+          x: panStart.current.panX + (pending.clientX - panStart.current.x),
+          y: panStart.current.panY + (pending.clientY - panStart.current.y),
+        });
       });
     };
     const up = () => {
+      cancelAnimationFrame(raf);
+      raf = 0;
       setIsPanning(false);
       panStart.current = null;
     };
@@ -238,6 +264,7 @@ export default function DrawCanvas({
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', up);
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', up);
@@ -507,8 +534,10 @@ export default function DrawCanvas({
     }
   };
 
-  const handleSvgMouseMove = (e) => {
-    const pos = toSvgCoords(e);
+  // The actual work, run at most once per animation frame — see the
+  // `svgMoveRaf` comment above.
+  const processSvgMove = (clientX, clientY) => {
+    const pos = toSvgCoords({ clientX, clientY });
     setPointerPos(pos);
     if (marqueeStart.current) {
       setMarquee({ x1: marqueeStart.current.x, y1: marqueeStart.current.y, x2: pos.x, y2: pos.y });
@@ -543,6 +572,19 @@ export default function DrawCanvas({
     }
   };
 
+  const handleSvgMouseMove = (e) => {
+    // Pull the only two fields we need off the (React 19, unpooled)
+    // synthetic event synchronously — cheap — and defer the expensive
+    // hit-testing/setState work to the next frame.
+    pendingSvgMove.current = { clientX: e.clientX, clientY: e.clientY };
+    if (svgMoveRaf.current) return;
+    svgMoveRaf.current = requestAnimationFrame(() => {
+      svgMoveRaf.current = 0;
+      const p = pendingSvgMove.current;
+      if (p) processSvgMove(p.clientX, p.clientY);
+    });
+  };
+
   const finishMarquee = () => {
     if (marquee) {
       const x1 = Math.min(marquee.x1, marquee.x2), x2 = Math.max(marquee.x1, marquee.x2);
@@ -569,6 +611,10 @@ export default function DrawCanvas({
   };
 
   const handleSvgMouseLeave = () => {
+    // Drop any queued frame from a move that's now stale (the cursor's
+    // left the canvas), so it can't fire after the state below resets.
+    cancelAnimationFrame(svgMoveRaf.current);
+    svgMoveRaf.current = 0;
     setPointerPos(null);
     setHoverAtom(null);
     setHoverBond(null);
@@ -576,6 +622,10 @@ export default function DrawCanvas({
   };
 
   const handleSvgMouseUp = (e) => {
+    // Same reasoning: whatever's about to be committed below should win
+    // over a stale mid-drag frame that just happens to fire afterward.
+    cancelAnimationFrame(svgMoveRaf.current);
+    svgMoveRaf.current = 0;
     if (marqueeStart.current) {
       finishMarquee();
       return;

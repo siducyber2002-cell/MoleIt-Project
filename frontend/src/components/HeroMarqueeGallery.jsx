@@ -272,10 +272,25 @@ function FeatureCoverflow() {
 
   // Main animation loop: idles forward at BASE_SPEED, or — after a drag —
   // keeps coasting at the released velocity while it decays back to BASE_SPEED.
+  // Gated the same way the app's 3D molecule viewers already are (see
+  // useThreeScene.js / HeroMolecule.jsx): this is an 11-card 3D
+  // `preserve-3d` carousel, each card carrying its own looping SVG
+  // animation on top — continuously rotating that whole stack, even while
+  // it's scrolled off-screen or the tab is backgrounded, is exactly the
+  // kind of steady frame cost that reads as "smooth on a laptop, janky on
+  // a phone." Pausing the rotation math + style write while off-screen
+  // costs nothing visually (it isn't visible) and gives every other
+  // on-screen animation more of the phone's frame budget.
   useEffect(() => {
+    const viewportEl = viewportRef.current;
+    let onScreen = true;
     let last = performance.now();
 
     const tick = (now) => {
+      if (!onScreen || document.hidden) {
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
 
@@ -292,7 +307,31 @@ function FeatureCoverflow() {
     };
 
     rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
+
+    let io;
+    if (viewportEl && typeof IntersectionObserver !== 'undefined') {
+      io = new IntersectionObserver(
+        ([entry]) => {
+          onScreen = entry.isIntersecting;
+          // Dropping straight back in mid-rotation is fine — the loop
+          // just resumes advancing the angle from wherever it left off,
+          // there's nothing to "catch up" on.
+          if (onScreen) last = performance.now();
+        },
+        { threshold: 0 }
+      );
+      io.observe(viewportEl);
+    }
+    const onVisibility = () => {
+      if (!document.hidden) last = performance.now();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      io?.disconnect();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   const handlePointerDown = useCallback((e) => {

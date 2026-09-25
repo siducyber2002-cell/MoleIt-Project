@@ -127,6 +127,11 @@ export default function BrandVideoSection() {
   // on the component's very first mount (e.g. a hard page refresh).
   const [logoPlayKey, setLogoPlayKey] = useState(0);
   const logoObserverTargetRef = useRef(null);
+  // Tracks whether the panel is currently on-screen, so the player can be
+  // paused instead of decoding + compositing an embedded YouTube iframe
+  // for the entire time the user is scrolled somewhere else on the page.
+  const isVisibleRef = useRef(false);
+  const playerReadyRef = useRef(false);
 
   useEffect(() => {
     const node = logoObserverTargetRef.current;
@@ -134,8 +139,12 @@ export default function BrandVideoSection() {
 
     const observer = new IntersectionObserver(
       ([entry]) => {
+        isVisibleRef.current = entry.isIntersecting;
         if (entry.isIntersecting) {
           setLogoPlayKey((k) => k + 1);
+          if (playerReadyRef.current) playerRef.current?.playVideo?.();
+        } else if (playerReadyRef.current) {
+          playerRef.current?.pauseVideo?.();
         }
       },
       // Fires once the panel is meaningfully on-screen, in both scroll
@@ -147,62 +156,97 @@ export default function BrandVideoSection() {
     return () => observer.disconnect();
   }, []);
 
+  // Loading the YouTube API + creating the player is deferred until the
+  // panel is getting close to the viewport (a generous 500px rootMargin,
+  // so the video is ready the moment it scrolls into view, not popping in
+  // a beat late) instead of unconditionally on every homepage load. On a
+  // slower mobile connection/CPU that's real work — API script fetch,
+  // iframe creation, player boot — spent on a section the person may
+  // never even scroll to.
   useEffect(() => {
+    const node = logoObserverTargetRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      // No IO support: fall back to the old unconditional behaviour below.
+    }
+
     let cancelled = false;
+    let lazyObserver;
 
-    loadYouTubeApi().then((YT) => {
-      if (cancelled || !mountRef.current) return;
+    const bootPlayer = () => {
+      loadYouTubeApi().then((YT) => {
+        if (cancelled || !mountRef.current) return;
 
-      playerRef.current = new YT.Player(mountRef.current, {
-        videoId: YOUTUBE_VIDEO_ID,
-        width: '100%',
-        height: '100%',
-        playerVars: {
-          autoplay: 1,
-          mute: 1,
-          controls: 0,
-          modestbranding: 1,
-          rel: 0,
-          showinfo: 0,
-          iv_load_policy: 3,
-          playsinline: 1,
-          disablekb: 1,
-          start: START_SECONDS,
-        },
-        events: {
-          onReady: (e) => {
-            // Make the video cover the entire panel.
-            // The source video is 16:9 while the panel is now much wider
-            // (shorter/leaner), so we make the iframe wider and crop the
-            // top/bottom to fill without stretching.
-            const iframe = e.target.getIframe();
-
-            Object.assign(iframe.style, {
-              position: 'absolute',
-              top: '50%',
-              left: '50%',
-              width: '100%',
-              height: '220%',
-              border: '0',
-              pointerEvents: 'none',
-              transform: 'translate(-50%, -50%)',
-            });
-
-            e.target.mute();
-            e.target.playVideo();
+        playerRef.current = new YT.Player(mountRef.current, {
+          videoId: YOUTUBE_VIDEO_ID,
+          width: '100%',
+          height: '100%',
+          playerVars: {
+            autoplay: 1,
+            mute: 1,
+            controls: 0,
+            modestbranding: 1,
+            rel: 0,
+            showinfo: 0,
+            iv_load_policy: 3,
+            playsinline: 1,
+            disablekb: 1,
+            start: START_SECONDS,
           },
-          onStateChange: (e) => {
-            if (e.data === YT.PlayerState.ENDED) {
-              e.target.seekTo(START_SECONDS, true);
-              e.target.playVideo();
-            }
+          events: {
+            onReady: (e) => {
+              // Make the video cover the entire panel.
+              // The source video is 16:9 while the panel is now much wider
+              // (shorter/leaner), so we make the iframe wider and crop the
+              // top/bottom to fill without stretching.
+              const iframe = e.target.getIframe();
+
+              Object.assign(iframe.style, {
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                width: '100%',
+                height: '220%',
+                border: '0',
+                pointerEvents: 'none',
+                transform: 'translate(-50%, -50%)',
+              });
+
+              playerReadyRef.current = true;
+              e.target.mute();
+              // Only actually start playing if the panel is still (or
+              // already) on-screen by the time the player finishes
+              // booting — it may well not be, given the load took a beat.
+              if (isVisibleRef.current) e.target.playVideo();
+            },
+            onStateChange: (e) => {
+              if (e.data === YT.PlayerState.ENDED) {
+                e.target.seekTo(START_SECONDS, true);
+                if (isVisibleRef.current) e.target.playVideo();
+              }
+            },
           },
-        },
+        });
       });
-    });
+    };
+
+    if (typeof IntersectionObserver === 'undefined') {
+      bootPlayer();
+    } else {
+      lazyObserver = new IntersectionObserver(
+        ([entry]) => {
+          if (entry.isIntersecting) {
+            bootPlayer();
+            lazyObserver.disconnect();
+          }
+        },
+        { rootMargin: '500px 0px' }
+      );
+      lazyObserver.observe(node);
+    }
 
     return () => {
       cancelled = true;
+      lazyObserver?.disconnect();
       playerRef.current?.destroy?.();
     };
   }, []);

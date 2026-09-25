@@ -80,6 +80,12 @@ body.fg-light-scroll {
   border-radius: 999px;
   filter: blur(90px);
   opacity: 0.32;
+  /* Own compositor layer: the blur is rasterized once, drift below is
+     then a cheap transform composite instead of a per-frame blur
+     repaint (the big Android-specific cost here — see the matching
+     comment on .dl-orb in DrawLabPage.css). */
+  will-change: transform;
+  transform: translateZ(0);
 }
 .fg-orb--violet {
   top: -160px;
@@ -94,6 +100,20 @@ body.fg-light-scroll {
 @keyframes fg-orb-drift {
   0% { transform: translate3d(0, 0, 0) scale(1); }
   100% { transform: translate3d(16px, 22px, 0) scale(1.05); }
+}
+/* Touch devices — see the matching .dl-orb rule in DrawLabPage.css for
+   why: a 90px blur is much costlier to rasterize on a phone GPU, and
+   the scale() half of the drift risks a re-rasterize even under
+   will-change, so both are trimmed here instead of on desktop. */
+@media (pointer: coarse) {
+  .fg-orb { filter: blur(28px); }
+  .fg-orb { animation-duration: 44s; }
+}
+@media (pointer: coarse) and (prefers-reduced-motion: no-preference) {
+  @keyframes fg-orb-drift {
+    0% { transform: translate3d(0, 0, 0); }
+    100% { transform: translate3d(12px, 16px, 0); }
+  }
 }
 
 /* Hero watermark: the ribbon sits full-bleed (edge-to-edge across the

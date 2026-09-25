@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -13,6 +13,7 @@ from ..auth import (
 )
 from ..exceptions import BadRequestError, UnauthorizedError
 from ..logging_config import get_logger
+from ..mailer import send_welcome_email
 from ..responses import ok, err, serialize
 
 logger = get_logger(__name__)
@@ -21,7 +22,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/register")
-def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
+def register(payload: schemas.UserCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     logger.info("Register attempt for email=%s", payload.email)
     try:
         existing = db.query(models.User).filter(models.User.email == payload.email).first()
@@ -39,6 +40,15 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
 
         token = create_access_token({"sub": user.id})
         logger.info("Register success for email=%s, user_id=%s", payload.email, user.id)
+
+        # Fire the welcome email in the background — this is the user's
+        # first-ever successful signup, so it's the right (and only)
+        # moment to send it. Running it as a background task means the
+        # register response comes back immediately; the email goes out a
+        # moment later and a failed/unconfigured send (see app/mailer.py)
+        # never turns into a failed registration.
+        background_tasks.add_task(send_welcome_email, user.email, user.name)
+
         return ok(
             201, "User registered successfully",
             access_token=token, token_type="bearer", user=serialize(schemas.UserOut, user),

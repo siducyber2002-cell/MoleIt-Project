@@ -66,6 +66,7 @@ export default function QuantumOrbitAnimation({ size = 280, className = '', tone
   const orbit3Id = `quantum-orbit-3-${uid}`;
   const glowId = `quantum-nucleus-glow-${uid}`;
 
+  const rootRef = useRef(null);
   const [hovered, setHovered] = useState(false);
   const [turbo, setTurbo] = useState(false);
   const [turboKey, setTurboKey] = useState(0);
@@ -121,9 +122,21 @@ export default function QuantumOrbitAnimation({ size = 280, className = '', tone
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     if (reduceMotion) return undefined;
 
+    // Same on-screen/tab-visibility gating as the app's 3D viewers (see
+    // useThreeScene.js). This widget shows up multiple times per page in
+    // some layouts, each running its own rAF loop moving 3 SVG electrons
+    // every frame — cheap individually, but with no gating every copy of
+    // it kept ticking even when scrolled well out of view, stacking up on
+    // top of whatever's actually on screen. Pausing off-screen copies
+    // frees that budget for what the user can actually see.
     let raf = 0;
     let last = 0;
+    let onScreen = true;
     const tick = (now) => {
+      if (!onScreen || document.hidden) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
       if (!last) last = now;
       // clamp dt so a background-tab pause doesn't cause a big jump
       const dt = Math.min(0.05, (now - last) / 1000);
@@ -141,7 +154,29 @@ export default function QuantumOrbitAnimation({ size = 280, className = '', tone
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+
+    let io;
+    const node = rootRef.current;
+    if (node && typeof IntersectionObserver !== 'undefined') {
+      io = new IntersectionObserver(
+        ([entry]) => {
+          onScreen = entry.isIntersecting;
+          if (onScreen) last = 0;
+        },
+        { threshold: 0 }
+      );
+      io.observe(node);
+    }
+    const onVisibility = () => {
+      if (!document.hidden) last = 0;
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      io?.disconnect();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -154,6 +189,7 @@ export default function QuantumOrbitAnimation({ size = 280, className = '', tone
 
   return (
     <button
+      ref={rootRef}
       type="button"
       onClick={triggerTurbo}
       onKeyDown={handleKeyDown}

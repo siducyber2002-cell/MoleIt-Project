@@ -31,6 +31,15 @@
   border-radius: 999px;
   filter: blur(120px);
   opacity: 0.14;
+  /* Promote to its own compositor layer so the (expensive) blur is
+     rasterized once and the drift animation below only ever costs a
+     cheap transform composite, not a per-frame blur repaint. Without
+     this, phone GPUs — which handle large-radius CSS filter blur far
+     worse than desktop GPUs do — were redoing the 120px blur every
+     frame, which is what turned this page's ambient background into a
+     steady frame-rate tax on Android. */
+  will-change: transform;
+  transform: translateZ(0);
 }
 .dl-orb--phosphor {
   top: -200px;
@@ -53,6 +62,25 @@
 @keyframes dl-orb-drift {
   0% { transform: translate3d(0, 0, 0) scale(1); }
   100% { transform: translate3d(14px, 16px, 0) scale(1.05); }
+}
+/* Touch devices (phones/tablets) — same "coarse pointer = treat as
+   low-power" signal the 3D viewers already use (see lib/perfTier.js).
+   A 120px CSS blur is dramatically more expensive to rasterize on a
+   phone GPU than a laptop's, so it's shrunk hard here instead of just
+   turned off, keeping the ambient glow without the frame cost. The
+   `scale()` half of the drift is dropped too — animating an element's
+   size forces a re-rasterize on some Android compositors even with
+   `will-change`, where a pure `translate` stays a cheap, layer-only
+   composite. */
+@media (pointer: coarse) {
+  .dl-orb { filter: blur(36px); }
+  .dl-orb, .dl-orb--violet { animation-duration: 42s; }
+}
+@media (pointer: coarse) and (prefers-reduced-motion: no-preference) {
+  @keyframes dl-orb-drift {
+    0% { transform: translate3d(0, 0, 0); }
+    100% { transform: translate3d(10px, 12px, 0); }
+  }
 }
 
 .dl-header {
