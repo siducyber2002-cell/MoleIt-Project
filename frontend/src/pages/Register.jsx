@@ -11,7 +11,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { User, Mail, Lock, ArrowRight, ArrowLeft, Check, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { useToast } from '../context/ToastContext';
+import { useStatusOverlay } from '../context/StatusOverlayContext';
 import { extractErrorMessage } from '../api/api';
 import MoleItLogo from '../components/MoleItLogo';
 import {
@@ -130,7 +130,7 @@ const panelVariants = {
 
 export default function Register() {
   const { register } = useAuth();
-  const { showToast } = useToast();
+  const { showStatus } = useStatusOverlay();
   const navigate = useNavigate();
   const location = useLocation();
   const reduceMotion = useReducedMotionPref();
@@ -175,7 +175,11 @@ export default function Register() {
 
       try {
         await register(name.trim(), email.trim(), password);
-        showToast('Sign up successful', 'success');
+        showStatus({
+          type: 'success',
+          title: 'Signed Up!',
+          subtitle: 'Welcome aboard — your account is ready.',
+        });
         navigate(location.state?.from || '/', { replace: true });
         return { error: null };
       } catch (err) {
