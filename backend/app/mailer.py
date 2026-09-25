@@ -64,6 +64,12 @@ def send_email(to_email: str, subject: str, html_body: str, text_body: str) -> b
         headers={
             "Authorization": f"Bearer {settings.RESEND_API_KEY}",
             "Content-Type": "application/json",
+            # Without a normal User-Agent, urllib's default
+            # ("Python-urllib/3.x") gets flagged and blocked by
+            # Cloudflare's bot protection in front of Resend's API
+            # (surfaces as a 403 with "error code: 1010"), before the
+            # request ever reaches Resend itself.
+            "User-Agent": "MoleIt-Backend/1.0 (+https://moleit.onrender.com)",
         },
     )
 
