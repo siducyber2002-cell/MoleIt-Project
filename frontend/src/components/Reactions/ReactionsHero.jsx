@@ -97,13 +97,14 @@ function FlaskBubbles() {
       type="button"
       onClick={handleClick}
       aria-label="Fizz the flask"
-      className="absolute left-[18rem] top-[1.2rem] h-12 w-12 cursor-pointer sm:left-[16rem] sm:top-[1.8rem] sm:h-16 sm:w-16"
+      className="absolute left-[10.5rem] top-[0.35rem] h-9 w-9 cursor-pointer sm:left-[16rem] sm:top-[1.8rem] sm:h-16 sm:w-16"
     >
       <motion.div
         animate={controls}
-        className="relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-fuchsia-400 shadow-lg shadow-fuchsia-900/50 ring-4 ring-lab-950/60 sm:h-16 sm:w-16"
+        className="relative flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-fuchsia-400 shadow-lg shadow-fuchsia-900/50 ring-4 ring-lab-950/60 sm:h-16 sm:w-16"
       >
-        <FlaskConical size={24} className="text-white" />
+        <FlaskConical size={18} className="text-white sm:hidden" />
+        <FlaskConical size={24} className="hidden text-white sm:block" />
 
         {steadyBubbles.map((i) => (
           <motion.span
@@ -139,19 +140,24 @@ export default function ReactionsHero({ reactions = [], onSelect, loading }) {
   }, [reactions]);
 
   return (
-    <section className="relative h-[min(88vh,760px)] min-h-[560px] w-full">
-      <div className="relative z-10 grid h-full grid-cols-1 lg:grid-cols-2">
-        {/* Left: headline. Shifted up a bit within its centered flex
-            box via translate (rather than fighting justify-center) — the
-            badge/headline block was sitting visibly lower than the
-            reaction-tile columns on the right. */}
-        <div className="flex -translate-y-6 flex-col justify-center px-6 py-8 sm:-translate-y-10 sm:px-10 sm:py-10">
+    <section className="relative w-full sm:h-[min(88vh,760px)] sm:min-h-[560px]">
+      <div className="relative z-10 grid grid-cols-1 sm:h-full lg:grid-cols-2">
+        {/* Left: headline. On sm+ (where the section has a fixed height and
+            the counter-scrolling tile columns sit alongside it) this is
+            shifted up a bit within its centered flex box via translate —
+            rather than fighting justify-center — since the badge/headline
+            block otherwise sits visibly lower than those columns. On phones
+            the section has no forced height at all (the columns are hidden
+            below sm anyway), so this just flows naturally top-to-bottom
+            with its own compact padding instead of sitting centered in a
+            tall, mostly-empty box. */}
+        <div className="flex flex-col justify-center px-5 py-7 sm:-translate-y-10 sm:px-10 sm:py-10">
           <span className="inline-flex w-fit items-center gap-2 rounded-full border border-purple-500/30 bg-lab-900/60 px-4 py-1.5 text-xs font-semibold uppercase tracking-wide text-purple-300 sm:text-sm">
             <span className="h-2 w-2 rounded-full bg-purple-400" /> Reaction Library
           </span>
 
-          <div className="relative mt-5 w-fit max-w-2xl">
-            <h1 className="font-display text-6xl font-bold leading-[1.02] tracking-tight sm:text-7xl lg:text-8xl">
+          <div className="relative mt-4 w-fit max-w-2xl sm:mt-5">
+            <h1 className="font-display text-4xl font-bold leading-[1.05] tracking-tight sm:text-7xl sm:leading-[1.02] lg:text-8xl">
               <GlitchText
                 as="span"
                 className="bg-gradient-to-r from-fuchsia-400 to-purple-300 bg-clip-text text-transparent"
@@ -168,7 +174,7 @@ export default function ReactionsHero({ reactions = [], onSelect, loading }) {
             <FlaskBubbles />
           </div>
 
-          <p className="mt-6 max-w-md text-base leading-relaxed text-lab-400 sm:text-lg">
+          <p className="mt-4 max-w-md text-sm leading-relaxed text-lab-400 sm:mt-6 sm:text-base lg:text-lg">
             Named reactions, electron-pushing arrows, and step-by-step mechanisms — tap any card
             to open it, or scroll down to search the full library.
           </p>

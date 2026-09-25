@@ -1,6 +1,8 @@
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { FlaskConical } from 'lucide-react';
 import { AuthProvider } from './context/AuthContext';
+import { ToastProvider } from './context/ToastContext';
+import { StatusOverlayProvider } from './context/StatusOverlayContext';
 import SiteMenu from './components/SiteMenu';
 import MoleItLogo from './components/MoleItLogo';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -110,9 +112,13 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <SmoothScroll>
-          <AppShell />
-        </SmoothScroll>
+        <ToastProvider>
+          <StatusOverlayProvider>
+            <SmoothScroll>
+              <AppShell />
+            </SmoothScroll>
+          </StatusOverlayProvider>
+        </ToastProvider>
       </AuthProvider>
     </BrowserRouter>
   );

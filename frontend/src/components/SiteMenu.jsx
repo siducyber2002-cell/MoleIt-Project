@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
+import { useStatusOverlay } from '../context/StatusOverlayContext';
 import MoleItLogo from './MoleItLogo';
 import MenuCursor from './MenuCursor';
+import LogoutConfirmDialog from './LogoutConfirmDialog';
 import './home/indisea.css';
 
 // The one navigation for the whole app: a round "Menu" button that opens a
@@ -37,9 +39,11 @@ function isActive(pathname, to) {
 
 export default function SiteMenu() {
   const { user, logout } = useAuth();
+  const { showStatus } = useStatusOverlay();
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const [open, setOpen] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [origin, setOrigin] = useState({ x: 0, y: 0, r: 0 });
   const burgerRef = useRef(null);
   const menuRef = useRef(null);
@@ -180,8 +184,7 @@ export default function SiteMenu() {
                     type="button"
                     onClick={() => {
                       close();
-                      logout();
-                      navigate('/');
+                      setConfirmOpen(true);
                     }}
                   >
                     Log out
@@ -204,6 +207,22 @@ export default function SiteMenu() {
 
       {/* visible pointer above the menu (the page's own cursor sits underneath it) */}
       {open && <MenuCursor />}
+
+      <LogoutConfirmDialog
+        open={confirmOpen}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={() => {
+          setConfirmOpen(false);
+          logout();
+          navigate('/');
+          showStatus({
+            type: 'success',
+            title: 'Logged Out!',
+            subtitle: 'You have been securely logged out.',
+            sparkle: false,
+          });
+        }}
+      />
     </>
   );
 }

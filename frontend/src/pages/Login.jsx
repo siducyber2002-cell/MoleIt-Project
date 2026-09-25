@@ -3,6 +3,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Mail, Lock, ArrowRight, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useStatusOverlay } from '../context/StatusOverlayContext';
 import { extractErrorMessage } from '../api/api';
 import MoleItLogo from '../components/MoleItLogo';
 import {
@@ -37,6 +38,7 @@ const rowVariants = {
 
 export default function Login() {
   const { login } = useAuth();
+  const { showStatus } = useStatusOverlay();
   const navigate = useNavigate();
   const location = useLocation();
   const reduceMotion = useReducedMotionPref();
@@ -65,6 +67,11 @@ export default function Login() {
 
       try {
         await login(nextEmail, nextPassword);
+        showStatus({
+          type: 'success',
+          title: 'Logged In!',
+          subtitle: 'Welcome back! You are now signed in.',
+        });
         navigate(location.state?.from || '/', { replace: true });
         return { error: null };
       } catch (err) {

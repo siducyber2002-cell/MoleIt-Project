@@ -35,6 +35,7 @@ from .common import (
     bond_order_value as _bond_order,
     stable_fraction_fnv as stable_fraction,
 )
+from .spin_systems import simulate_spin_system_ppm
 
 Range = Tuple[float, float]
 
@@ -1861,11 +1862,111 @@ def predict_nmr(atoms: List[Dict[str, Any]], bonds: List[Dict[str, Any]], solven
                 f'separately, rather than a confidently wrong clean multiplet.{ab_note}'
             )
 
+    def coupling_partner_group_sigs(rep_atom_id: str, own_atom_ids: Set[str]) -> Set[str]:
+        return {
+            atom_to_h1_sig[n.atom['id']]
+            for n in neighbors_of(rep_atom_id, ctx)
+            if n.atom['id'] not in own_atom_ids
+            and n.atom['element'] == 'C' and _bond_order(n.bond) == 1
+            and not is_aromatic_atom(n.atom['id'], ctx)
+            and total_attached_h(n.atom, ctx) > 0
+            and n.atom['id'] in atom_to_h1_sig
+        }
+
+    def flag_three_spin_systems(h1_list: List[Dict[str, Any]]) -> None:
+        """Isolated 3-spin (ABX/ABC-scale) systems: three distinct,
+        single-proton (`integration == 1`) carbons, each coupled to the
+        others and to nothing outside the trio — either a chain A-B-X
+        (2 couplings: A-B and B-X; the textbook ABX case) or all three
+        mutually vicinal on a small ring (3 couplings: A-B, B-X, A-X —
+        an ABC case). `flag_second_order` above already flags each of
+        these three peaks individually and, for a genuine chain's two
+        *end* peaks, correctly declines to attach its 2-spin AB quartet
+        (their partner's own partner set has 2 members, not 1, so the
+        isolated-pair check there fails as it should). The *middle*
+        peak of a chain is coupled to exactly one partner from each
+        end's point of view, though, so that same 2-spin check *can*
+        wrongly succeed for it alone — using only its coupling to
+        whichever end gave the smaller ratio, silently ignoring the
+        other. This pass finds any such triad as a whole (by building
+        the actual coupling graph among clean single-proton groups
+        rather than assuming a fixed shape — a ring member has 2
+        coupling partners, same as a chain's middle atom, so anchoring
+        on "exactly 1 partner" the way the 2-spin case does would only
+        ever find chain ends and never a ring), replaces any
+        potentially-wrong 2-spin approximation on a shared atom with
+        the exact 3-spin diagonalization (which is exact for the whole
+        triad, not per-atom), and attaches the same result to all three
+        peaks so all three explanations agree.
+        """
+        clean: Dict[str, Dict[str, Any]] = {}
+        for g in h1_list:
+            if g.get('integration') == 1 and g.get('jHz'):
+                sig = atom_to_h1_sig.get(g['atomIds'][0])
+                if sig is not None:
+                    clean[sig] = g
+
+        full_partners: Dict[str, Set[str]] = {}
+        for sig, g in clean.items():
+            full_partners[sig] = coupling_partner_group_sigs(g['atomIds'][0], set(g['atomIds']))
+
+        seen_triads: Set[frozenset] = set()
+        for sig_a in clean:
+            for sig_b in full_partners[sig_a] & clean.keys():
+                for sig_c in full_partners[sig_b] & clean.keys():
+                    if sig_c == sig_a:
+                        continue
+                    triad = frozenset([sig_a, sig_b, sig_c])
+                    if len(triad) != 3 or triad in seen_triads:
+                        continue
+                    # Isolation: every member's coupling partners must
+                    # stay entirely inside this triad — otherwise it's
+                    # really part of a bigger spin network where the
+                    # exact 3-spin solution wouldn't be exact either.
+                    if not (full_partners[sig_a] <= triad and full_partners[sig_b] <= triad and full_partners.get(sig_c, set()) <= triad):
+                        continue
+                    seen_triads.add(triad)
+
+                    is_ring = sig_c in full_partners[sig_a]  # A-C coupling present -> all 3 pairs coupled
+                    g_a, g_b, g_c = clean[sig_a], clean[sig_b], clean[sig_c]
+
+                    def edge_j(x: Dict[str, Any], y: Dict[str, Any]) -> float:
+                        jx = (x.get('jHz') or [7.5])[0] or 7.5
+                        jy = (y.get('jHz') or [7.5])[0] or 7.5
+                        return (jx + jy) / 2.0
+
+                    j_ab = edge_j(g_a, g_b)
+                    j_bc = edge_j(g_b, g_c)
+                    j_ac = edge_j(g_a, g_c) if is_ring else 0.0
+                    shift_a, shift_b, shift_c = g_a['shift'], g_b['shift'], g_c['shift']
+
+                    pairs = [(shift_a, shift_b, j_ab), (shift_b, shift_c, j_bc)] + ([(shift_a, shift_c, j_ac)] if is_ring else [])
+                    worth_it = any(j and abs(sx - sy) * _DEFAULT_FREQ_MHZ / j < 4 for sx, sy, j in pairs)
+                    if not worth_it:
+                        continue
+
+                    lines = simulate_spin_system_ppm([shift_a, shift_b, shift_c],
+                                                      [[0, j_ab, j_ac], [j_ab, 0, j_bc], [j_ac, j_bc, 0]],
+                                                      _DEFAULT_FREQ_MHZ)
+                    spin_system_data = {
+                        'kind': 'ABC' if is_ring else 'ABX',
+                        'lines': lines,
+                        'members': [{'role': 'A', 'key': g_a['key']}, {'role': 'B', 'key': g_b['key']}, {'role': 'X', 'key': g_c['key']}],
+                    }
+                    for member_g in (g_a, g_b, g_c):
+                        member_g['secondOrder'] = True
+                        member_g.setdefault('reportedMultiplicity', member_g.get('multiplicity'))
+                        member_g['multiplicity'] = 'm (second-order, 3-spin system)'
+                        member_g['confidence'] = min(member_g.get('confidence', 0.7), 0.4)
+                        member_g.pop('abQuartet', None)  # a 2-spin approximation would be wrong for a true triad member
+                        member_g['spinSystem'] = spin_system_data
+
     def to_sorted_peaks(groups: Dict[str, Dict[str, Any]], is_h1: bool = False) -> List[Dict[str, Any]]:
         lst = list(groups.values())
         assign_refined_shifts(lst)
         if is_h1:
             flag_second_order(lst)
+            flag_three_spin_systems(lst)
         out = []
         for g in lst:
             confidence_info = estimate_confidence(g['key'], g['range'])
@@ -1881,6 +1982,14 @@ def predict_nmr(atoms: List[Dict[str, Any]], bonds: List[Dict[str, Any]], solven
                     f"Isolated two-spin (AB) system — exact 4-line positions ~{ab['linesPpm']} ppm, "
                     f"outer:inner intensity ratio ~{ab['outerInnerIntensityRatio']}:1 (Pople-Schneider-Bernstein "
                     f"closed form, not just a flag)"
+                )
+            if g.get('spinSystem'):
+                ss = g['spinSystem']
+                other_keys = [m['key'] for m in ss['members'] if m['key'] != g['key']]
+                factors.append(
+                    f"Part of an isolated {ss['kind']} 3-spin system with {', '.join(other_keys)} — exact line "
+                    f"positions computed by diagonalizing the full spin Hamiltonian (not first-order n+1 splitting): "
+                    f"{[l['ppm'] for l in ss['lines']]} ppm"
                 )
             out.append({
                 **g,

@@ -21,6 +21,15 @@ html.ix-menu-open {
   overflow: hidden;
 }
 
+/* LogoutConfirmDialog / StatusOverlay both render above the custom cursor
+   dots (z 200 / z 300 above) — the dot doesn't know to draw above them, so
+   without this the pointer just disappears while one is open. Restore the
+   plain native cursor for as long as html carries this class. */
+html.ix-native-cursor,
+html.ix-native-cursor * {
+  cursor: auto !important;
+}
+
 :root {
   /* palette */
   --ix-bg: #f0edea;

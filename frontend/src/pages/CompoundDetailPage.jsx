@@ -955,10 +955,29 @@ const DETAIL_CSS = `
      unreadable. Keep them at a legible size and let the card scroll sideways instead. */
   .cd-scope :has(> svg.w-full) { overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
   .cd-scope svg.w-full { min-width: 620px; }
-  .cd-scope .rounded-xl:has(> svg.w-full)::after {
-    content: "Swipe sideways to see the whole spectrum";
-    position: sticky; left: 0; display: block; width: max-content; max-width: 100%; margin-top: 8px;
-    font: 500 11px/1.4 var(--lib-font-body); color: var(--lib-ink-3);
+
+  /* The old hint was a thin gray line sitting under the chart — easy to miss.
+     This one sits ABOVE the chart as a solid, colored pill (so it's seen
+     before any scrolling happens), stays pinned to the left edge while the
+     card scrolls, and gives itself a small side-to-side nudge so it reads
+     as "swipeable" rather than just decorative text. */
+  .cd-scope .rounded-xl:has(> svg.w-full) { position: relative; }
+  .cd-scope .rounded-xl:has(> svg.w-full)::before {
+    content: "\u21c6  Swipe to see the full spectrum";
+    position: sticky; left: 0; top: 0; z-index: 2;
+    display: inline-flex; width: max-content; max-width: 100%; margin-bottom: 10px;
+    padding: 6px 12px; border-radius: 999px;
+    font: 700 11.5px/1.3 var(--lib-font-body); letter-spacing: 0.01em;
+    color: #f4f8e6; background: #587600;
+    box-shadow: 0 4px 12px -3px rgba(14,16,10,0.45);
+    animation: cd-swipe-hint-nudge 1.6s ease-in-out infinite;
+  }
+  @keyframes cd-swipe-hint-nudge {
+    0%, 100% { transform: translateX(0); }
+    50% { transform: translateX(5px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cd-scope .rounded-xl:has(> svg.w-full)::before { animation: none; }
   }
 
   /* the small 3D previews inside NMR / IR: shorter, so the canvas is wider than tall and long molecules fit */

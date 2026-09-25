@@ -176,10 +176,10 @@ export default function ReactionsPage() {
 
       {/* Content sits above the wash. The horizontal clip lives here, on
           a wrapper that holds no fixed layers. */}
-      <div className="relative z-10 mx-auto w-full max-w-7xl overflow-x-clip px-4 py-8">
+      <div className="relative z-10 mx-auto w-full max-w-7xl overflow-x-clip px-4 py-4 sm:py-8">
 
         {!loadError && (
-          <div className="mb-10">
+          <div className="mb-5 sm:mb-10">
             <ReactionsHero reactions={heroReactions} onSelect={setSelectedReaction} loading={loading} />
           </div>
         )}

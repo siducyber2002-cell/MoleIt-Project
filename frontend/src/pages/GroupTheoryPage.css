@@ -379,6 +379,11 @@ html.gt-light-scroll .moleit-logo--dark .moleit-logo-shimmer {
 .gt-chartable td:first-child { position: sticky; left: 0; z-index: 1; background: var(--gt-card-bg, #fffdf8); }
 
 @media (max-width: 639px) {
+  /* Belt-and-braces: nothing inside this page should ever be able to push
+     the viewport into a horizontal scroll on Android/iOS, no matter what
+     gets added inside a .gt-card later. */
+  html.gt-light-scroll, body.gt-light-scroll { overflow-x: hidden; }
+
   /* 16px inputs: Android/iOS browsers zoom the page in when a smaller field is focused */
   .gt-input, .gt-textarea, .gt-tolerance-box input { font-size: 16px; }
   .gt-textarea { line-height: 1.45; }
@@ -388,5 +393,5 @@ html.gt-light-scroll .moleit-logo--dark .moleit-logo-shimmer {
   .gt-btn, .gt-btn-ghost { min-height: 44px; }
   .gt-input { min-height: 44px; }
   .gt-op-btn { min-height: 34px; padding: 6px 10px; font-size: 12px; }
-  .gt-tolerance-box { min-height: 44px; }
+  .gt-tolerance-box { min-height: 44px; width: 100%; justify-content: space-between; }
 }

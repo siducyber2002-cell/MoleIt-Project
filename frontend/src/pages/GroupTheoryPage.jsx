@@ -258,8 +258,8 @@ export default function GroupTheoryPage() {
     : null;
 
   return (
-    <div className="gt-page min-h-screen w-full">
-    <div className="mx-auto w-full max-w-[1680px] px-4 pb-24 pt-6 sm:px-6 lg:px-10">
+    <div className="gt-page min-h-screen w-full overflow-x-clip">
+    <div className="mx-auto w-full max-w-[1680px] overflow-x-clip px-4 pb-24 pt-6 sm:px-6 lg:px-10">
       {/* ---------------- hero ---------------- */}
       <div className="gt-section gt-section-paper relative mb-6 px-5 py-8 sm:px-9 sm:py-12">
         <div
@@ -337,7 +337,7 @@ export default function GroupTheoryPage() {
                 className="gt-textarea text-xs"
               />
 
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                 <label className="gt-tolerance-box">
                   <span className="text-[var(--gt-ink)]/70">Tolerance</span>
                   <input
@@ -350,7 +350,7 @@ export default function GroupTheoryPage() {
                   />
                   <span className="text-[var(--gt-ink)]/70">&Aring;</span>
                 </label>
-                <button onClick={() => runAnalyze()} disabled={loading} className="gt-btn">
+                <button onClick={() => runAnalyze()} disabled={loading} className="gt-btn w-full justify-center sm:w-auto">
                   {loading ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
                   Calculate point group
                 </button>
@@ -388,7 +388,7 @@ export default function GroupTheoryPage() {
                 onChange={(e) => setPubchemQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && runPubchem()}
                 placeholder="Name or CID, e.g. \u201cferrocene\u201d"
-                className="gt-input text-sm"
+                className="gt-input min-w-0 flex-1 text-sm"
               />
               <button onClick={runPubchem} disabled={loading} className="gt-btn-ghost px-3">
                 <Search size={14} />
