@@ -42,7 +42,8 @@ export default function FlowingRibbon({ className = '', height = 220, opacity = 
     const grainPattern = ctx.createPattern(noiseCanvas, 'repeat');
 
     let width = 0;
-    let raf;
+    let raf = 0;
+    let onScreen = true;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     function resize() {
@@ -87,6 +88,8 @@ export default function FlowingRibbon({ className = '', height = 220, opacity = 
     }
 
     function frame(ts) {
+      raf = 0;
+      if (!onScreen) return;
       ctx.clearRect(0, 0, width, height);
       const t = reduceMotion ? 0 : ts / 3400;
 
@@ -106,12 +109,26 @@ export default function FlowingRibbon({ className = '', height = 220, opacity = 
       if (!reduceMotion) raf = requestAnimationFrame(frame);
     }
 
+    // Only redraw while the ribbon is actually scrolled into view — it was
+    // previously redrawing every frame forever regardless of scroll
+    // position, which adds up on a phone when it's just one of several
+    // animations running on the page at once.
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        onScreen = entry.isIntersecting;
+        if (onScreen && !raf) raf = requestAnimationFrame(frame);
+      },
+      { threshold: 0 }
+    );
+    io.observe(canvas);
+
     raf = requestAnimationFrame(frame);
     if (reduceMotion) frame(0);
 
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      io.disconnect();
     };
   }, [height]);
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { isLowPowerDevice } from '../../lib/perfTier';
 
 /** Sets up a Three.js renderer/scene/camera/OrbitControls inside
  *  `containerRef` and runs the render loop. This is the Three.js
@@ -48,9 +49,11 @@ export function useThreeScene(containerRef, { background = 0x04090d, onFrame, li
     const el = containerRef.current;
     if (!el) return;
 
+    const lowPower = isLowPowerDevice();
+
     let renderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer = new THREE.WebGLRenderer({ antialias: !lowPower, alpha: true, powerPreference: 'high-performance' });
     } catch {
       // No WebGL (old browser, disabled GPU, some headless/embedded
       // contexts) — report it the same way use3DmolViewer reports a CDN
@@ -120,7 +123,7 @@ export function useThreeScene(containerRef, { background = 0x04090d, onFrame, li
     const resize = () => {
       const w = el.clientWidth || 1;
       const h = el.clientHeight || 1;
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, lowPower ? 1.5 : 2));
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
@@ -129,20 +132,57 @@ export function useThreeScene(containerRef, { background = 0x04090d, onFrame, li
     const ro = new ResizeObserver(resize);
     ro.observe(el);
 
-    let raf;
+    // Render loop: only runs while this viewer is actually on screen and
+    // the tab is visible. Every caller here (MiniThreeMoleculeViewer,
+    // ThreeStructurePreview, SymmetryElementsViewer…) defaults
+    // `controls.autoRotate` to true, so before this the loop ran forever,
+    // full-speed, the instant a viewer mounted — including scrolled off
+    // the bottom of a long page, or behind a modal, or in a background
+    // tab. On a phone GPU that's most of what "lagging" was: several
+    // invisible scenes still drawing every frame. Mirrors the same
+    // IntersectionObserver + document.hidden gating HeroMolecule already
+    // uses on the homepage.
+    let raf = 0;
+    let onScreen = true;
+    let disposed = false;
     const clock = new THREE.Clock();
-    const loop = () => {
+    const frame = () => {
+      raf = 0;
+      if (disposed || !onScreen || document.hidden) return;
       const dt = Math.min(clock.getDelta(), 0.1);
       controls.update();
       onFrameRef.current?.(dt);
       renderer.render(scene, camera);
-      raf = requestAnimationFrame(loop);
+      raf = requestAnimationFrame(frame);
     };
-    raf = requestAnimationFrame(loop);
+    const start = () => {
+      if (!raf && !disposed) {
+        clock.getDelta(); // drop the paused-time gap so dt doesn't jump on resume
+        raf = requestAnimationFrame(frame);
+      }
+    };
+
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        onScreen = entry.isIntersecting;
+        if (onScreen) start();
+      },
+      { threshold: 0 }
+    );
+    io.observe(el);
+    const onVisibility = () => {
+      if (!document.hidden) start();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
     setStatus('ready');
+    start();
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(raf);
+      io.disconnect();
+      document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
       controls.dispose();
       renderer.dispose();

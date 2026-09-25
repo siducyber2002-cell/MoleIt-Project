@@ -1,5 +1,16 @@
 import * as THREE from 'three';
 import { ELEMENTS } from '../../lib/elements';
+import { isLowPowerDevice } from '../../lib/perfTier';
+
+// Sphere/cylinder segment counts scale down on phones/tablets: every atom
+// and every bond strand gets its own geometry (see buildMoleculeGroup
+// below), so for a molecule with dozens of atoms this is the single
+// biggest lever on total triangle count. The shapes stay clearly round —
+// this only trims segments a mobile screen's pixel density can't resolve
+// anyway, never the shape a desktop user sees.
+const SPHERE_SEGMENTS = isLowPowerDevice() ? [12, 9] : [24, 18];
+const CLOUD_SHELL_SEGMENTS = isLowPowerDevice() ? [12, 10] : [20, 16];
+const BOND_RADIAL_SEGMENTS = isLowPowerDevice() ? 8 : 12;
 
 // Shared Three.js molecule builder used by every molecule viewer in the app
 // (ThreeMoleculeViewer, MiniThreeMoleculeViewer, ThreeStructurePreview).
@@ -199,7 +210,7 @@ export function buildMoleculeGroup({ atoms, bonds, styleId = 'ballstick', colorS
     const color = elemColor(a.element, colorScheme);
     const r = Math.max(baseR * style.sphereMul, 0.045);
 
-    const geo = new THREE.SphereGeometry(r, 24, 18);
+    const geo = new THREE.SphereGeometry(r, SPHERE_SEGMENTS[0], SPHERE_SEGMENTS[1]);
     const mesh = new THREE.Mesh(geo, makeAtomMaterial(color));
     const base = new THREE.Vector3(a.x, a.y, a.z);
     mesh.position.copy(base);
@@ -209,7 +220,7 @@ export function buildMoleculeGroup({ atoms, bonds, styleId = 'ballstick', colorS
 
     if (style.mode === 'cloud') {
       for (const shell of style.shells) {
-        const shellGeo = new THREE.SphereGeometry(baseR * shell.mul, 20, 16);
+        const shellGeo = new THREE.SphereGeometry(baseR * shell.mul, CLOUD_SHELL_SEGMENTS[0], CLOUD_SHELL_SEGMENTS[1]);
         const shellMesh = new THREE.Mesh(shellGeo, makeCloudMaterial(color, shell.opacity));
         shellMesh.position.copy(base);
         shellMesh.renderOrder = 1;
@@ -253,7 +264,7 @@ export function buildMoleculeGroup({ atoms, bonds, styleId = 'ballstick', colorS
       const strandRadius = order === 1 ? style.bondRadius : style.bondRadius * strandRadiusRatio;
 
       offsets.forEach((o) => {
-        const geo = new THREE.CylinderGeometry(strandRadius, strandRadius, len, 12);
+        const geo = new THREE.CylinderGeometry(strandRadius, strandRadius, len, BOND_RADIAL_SEGMENTS);
         const mesh = new THREE.Mesh(geo, bondMat);
         mesh.position.copy(mid).addScaledVector(side, o);
         mesh.quaternion.setFromUnitVectors(UP, unitDir);

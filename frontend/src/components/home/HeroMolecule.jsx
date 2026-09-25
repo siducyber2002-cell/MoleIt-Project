@@ -30,6 +30,16 @@ const DEFAULT_PALETTE = {
 const ATOM_RADIUS = { H: 0.3, C: 0.46, N: 0.43, O: 0.42, F: 0.38, P: 0.5, S: 0.52, Cl: 0.5, Br: 0.55, I: 0.6 };
 const BOND_COLOR = '#aaa39a';
 
+// Cheap, local phone/tablet check — kept inline rather than imported so this
+// component stays fully independent (see file comment above). Trims MSAA,
+// pixel ratio and sphere/cylinder segment counts on touch-primary devices,
+// which is where "smooth on desktop, laggy on Android" actually showed up.
+const IS_LOW_POWER =
+  typeof window !== 'undefined' && window.matchMedia
+    ? window.matchMedia('(pointer: coarse)').matches ||
+      (typeof navigator !== 'undefined' && navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4)
+    : false;
+
 // ---- tiny MDL V2000 mol-block reader ---------------------------------------
 function parseMolBlock(text) {
   const lines = String(text || '').replace(/\r/g, '').split('\n');
@@ -120,12 +130,12 @@ export default function HeroMolecule({
     // ---- renderer ---------------------------------------------------------
     let renderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+      renderer = new THREE.WebGLRenderer({ antialias: !IS_LOW_POWER, alpha: true, powerPreference: 'high-performance' });
     } catch {
       setStatus('failed');
       return undefined;
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, IS_LOW_POWER ? 1.5 : 2));
     renderer.setClearColor(0x000000, 0);
     stage.appendChild(renderer.domElement);
     // vertical swipes scroll the page; horizontal drags rotate the molecule
@@ -155,8 +165,8 @@ export default function HeroMolecule({
     const group = new THREE.Group();
     scene.add(group);
 
-    const sphereGeo = new THREE.SphereGeometry(1, 40, 28);
-    const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 20, 1);
+    const sphereGeo = IS_LOW_POWER ? new THREE.SphereGeometry(1, 16, 12) : new THREE.SphereGeometry(1, 40, 28);
+    const cylGeo = IS_LOW_POWER ? new THREE.CylinderGeometry(1, 1, 1, 10, 1) : new THREE.CylinderGeometry(1, 1, 1, 20, 1);
     const materials = new Map();
     const material = (hex) => {
       if (!materials.has(hex)) {
