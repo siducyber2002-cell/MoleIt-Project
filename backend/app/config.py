@@ -17,18 +17,16 @@ class Settings(BaseSettings):
     QUIZ_SEED_SECRET: str = os.getenv("QUIZ_SEED_SECRET", "dev_seed_secret_change_me")
 
     # --- Outbound email (welcome email on first-time signup) ---
-    # Leave SMTP_HOST/SMTP_USER/SMTP_PASSWORD blank in .env to disable
-    # sending entirely (registration still succeeds either way — see
-    # app/mailer.py). Works with any SMTP provider: Gmail (smtp.gmail.com,
-    # port 587, an App Password as SMTP_PASSWORD), SendGrid, Mailgun,
-    # Amazon SES, Postmark, etc.
-    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
-    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER: str = os.getenv("SMTP_USER", "")
-    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
-    SMTP_USE_TLS: bool = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
-    SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "no-reply@moleit.app")
-    SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "MoleIt")
+    # Sent via Resend's HTTP API (port 443) instead of raw SMTP, since
+    # Render blocks outbound SMTP ports (587/465) on most plans and Gmail
+    # also filters mail originating from hosting-provider IPs. Leave
+    # RESEND_API_KEY blank in .env to disable sending entirely
+    # (registration still succeeds either way — see app/mailer.py).
+    RESEND_API_KEY: str = os.getenv("RESEND_API_KEY", "")
+    # Use "onboarding@resend.dev" here until you verify your own domain
+    # in Resend (Domains tab) -- then switch to no-reply@yourdomain.com.
+    FROM_EMAIL: str = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
+    FROM_NAME: str = os.getenv("FROM_NAME", "MoleIt")
     # Used to build the "Open MoleIt" link in the welcome email.
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
 

@@ -1,94 +1,84 @@
 """
-Outbound transactional email (SMTP), currently just the "welcome" email
-sent the moment someone registers for the first time.
+Outbound transactional email, currently just the "welcome" email sent
+the moment someone registers for the first time.
 
-Deliberately built on the stdlib's smtplib/email — no new pip dependency,
-works with Gmail, SendGrid, Mailgun, Amazon SES, Postmark, or any other
-provider's SMTP relay, since they all speak plain SMTP.
+Sent via Resend's HTTP API (https://resend.com) over port 443, using
+only the stdlib's urllib -- no new pip dependency. This replaces a
+previous smtplib-based implementation: Render blocks outbound SMTP
+ports (587/465) on most plans, and Gmail separately filters/rejects
+mail sent from hosting-provider IP ranges, so raw SMTP from a Render
+container to smtp.gmail.com is not reliable. An HTTP API sidesteps
+both problems entirely.
 
-Design choices that matter:
-  * If SMTP isn't configured yet (no SMTP_HOST/SMTP_USER in .env), sending
-    is silently skipped — a warning is logged, but registration itself
+Design choices that matter (unchanged from the SMTP version):
+  * If Resend isn't configured yet (no RESEND_API_KEY in .env), sending
+    is silently skipped -- a warning is logged, but registration itself
     never fails just because email isn't set up. See `is_configured()`.
-  * Every call is wrapped so a real send failure (bad credentials, SMTP
-    server down, etc.) is logged and swallowed rather than raised — email
-    delivery should never be able to break a user-facing request. Call
-    `send_welcome_email` from a FastAPI BackgroundTask (see
-    routers/auth.py) so it also never adds latency to the response.
+  * Every call is wrapped so a real send failure (bad API key, Resend
+    down, invalid recipient, etc.) is logged and swallowed rather than
+    raised -- email delivery should never be able to break a
+    user-facing request. Call `send_welcome_email` from a FastAPI
+    BackgroundTask (see routers/auth.py) so it also never adds latency
+    to the response.
 """
 
-import smtplib
-import socket
-import ssl
-from contextlib import contextmanager
-from email.message import EmailMessage
+import json
+import urllib.request
+import urllib.error
 
 from .config import settings
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
-
-@contextmanager
-def _force_ipv4():
-    """Render's containers (and some other PaaS hosts) don't have a
-    working outbound IPv6 route, but smtp.gmail.com — like most mail
-    servers — resolves to both an IPv4 (A) and an IPv6 (AAAA) address.
-    Python's socket.create_connection() can pick the IPv6 one first and
-    fail with `OSError: [Errno 101] Network is unreachable`, even though
-    IPv4 works fine. Temporarily restrict DNS resolution to IPv4-only for
-    the duration of the SMTP connection so it never tries the broken
-    route in the first place."""
-    original_getaddrinfo = socket.getaddrinfo
-
-    def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-
-    socket.getaddrinfo = ipv4_only_getaddrinfo
-    try:
-        yield
-    finally:
-        socket.getaddrinfo = original_getaddrinfo
+RESEND_API_URL = "https://api.resend.com/emails"
 
 
 def is_configured() -> bool:
-    """True once the minimum SMTP settings have been filled in .env."""
-    return bool(settings.SMTP_HOST and settings.SMTP_USER and settings.SMTP_PASSWORD)
+    """True once the minimum Resend settings have been filled in .env."""
+    return bool(settings.RESEND_API_KEY)
 
 
 def send_email(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
-    """Sends one email. Returns True on success, False otherwise — never
+    """Sends one email. Returns True on success, False otherwise -- never
     raises, so it's always safe to call from a background task."""
     if not is_configured():
         logger.warning(
-            "Email not sent (SMTP not configured) | to=%s | subject=%s",
+            "Email not sent (Resend not configured) | to=%s | subject=%s",
             to_email, subject,
         )
         return False
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_FROM_EMAIL}>"
-    msg["To"] = to_email
-    msg.set_content(text_body)
-    msg.add_alternative(html_body, subtype="html")
+    payload = {
+        "from": f"{settings.FROM_NAME} <{settings.FROM_EMAIL}>",
+        "to": [to_email],
+        "subject": subject,
+        "html": html_body,
+        "text": text_body,
+    }
+
+    request = urllib.request.Request(
+        RESEND_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
 
     try:
-        if settings.SMTP_USE_TLS:
-            context = ssl.create_default_context()
-            with _force_ipv4():
-                with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as server:
-                    server.starttls(context=context)
-                    server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                    server.send_message(msg)
-        else:
-            context = ssl.create_default_context()
-            with _force_ipv4():
-                with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15, context=context) as server:
-                    server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                    server.send_message(msg)
+        with urllib.request.urlopen(request, timeout=15) as response:
+            response.read()
         logger.info("Email sent | to=%s | subject=%s", to_email, subject)
         return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error(
+            "Email send failed | to=%s | subject=%s | status=%s | body=%s",
+            to_email, subject, e.code, body,
+        )
+        return False
     except Exception:
         logger.error("Email send failed | to=%s | subject=%s", to_email, subject, exc_info=True)
         return False
