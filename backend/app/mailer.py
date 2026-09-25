@@ -18,13 +18,37 @@ Design choices that matter:
 """
 
 import smtplib
+import socket
 import ssl
+from contextlib import contextmanager
 from email.message import EmailMessage
 
 from .config import settings
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@contextmanager
+def _force_ipv4():
+    """Render's containers (and some other PaaS hosts) don't have a
+    working outbound IPv6 route, but smtp.gmail.com — like most mail
+    servers — resolves to both an IPv4 (A) and an IPv6 (AAAA) address.
+    Python's socket.create_connection() can pick the IPv6 one first and
+    fail with `OSError: [Errno 101] Network is unreachable`, even though
+    IPv4 works fine. Temporarily restrict DNS resolution to IPv4-only for
+    the duration of the SMTP connection so it never tries the broken
+    route in the first place."""
+    original_getaddrinfo = socket.getaddrinfo
+
+    def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = ipv4_only_getaddrinfo
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
 
 
 def is_configured() -> bool:
@@ -52,14 +76,17 @@ def send_email(to_email: str, subject: str, html_body: str, text_body: str) -> b
     try:
         if settings.SMTP_USE_TLS:
             context = ssl.create_default_context()
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as server:
-                server.starttls(context=context)
-                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                server.send_message(msg)
+            with _force_ipv4():
+                with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as server:
+                    server.starttls(context=context)
+                    server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                    server.send_message(msg)
         else:
-            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as server:
-                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                server.send_message(msg)
+            context = ssl.create_default_context()
+            with _force_ipv4():
+                with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15, context=context) as server:
+                    server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                    server.send_message(msg)
         logger.info("Email sent | to=%s | subject=%s", to_email, subject)
         return True
     except Exception:
