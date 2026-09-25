@@ -261,6 +261,24 @@ html.ix-native-cursor * {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(4px); }
 }
+.ix-hero__note {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: clamp(14px, 2.4vh, 22px);
+  padding: 7px 14px 7px 12px;
+  border: 1px solid rgba(20, 20, 19, 0.14);
+  border-radius: 999px;
+  background: rgba(20, 20, 19, 0.04);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ix-ink-soft, #6b6b69);
+}
+.ix-hero__note svg {
+  flex-shrink: 0;
+  opacity: 0.8;
+}
 .ix-ring {
   position: relative;
   display: grid;

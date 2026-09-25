@@ -71,6 +71,32 @@ export default function DrawLabPage() {
     return () => mq.removeEventListener('change', update);
   }, []);
 
+  // Mobile browsers (iOS Safari and several Android WebViews included)
+  // are notorious for not recomputing `100svh`/`100vh` immediately after
+  // an orientation change — the page keeps the old (portrait) height for
+  // a beat, or sometimes indefinitely until something else forces a
+  // reflow. That stale height is what made the whole workspace look
+  // "crashed" after rotating to landscape: everything below the stale
+  // cutoff was invisibly clipped by the outer `overflow-hidden`. Tracking
+  // `window.innerHeight` in JS and feeding it back in as an inline style
+  // sidesteps the CSS unit entirely, so the page always matches the
+  // *current* viewport, immediately, on every rotation.
+  const [vh, setVh] = useState(() => window.innerHeight);
+  useEffect(() => {
+    const updateVh = () => setVh(window.innerHeight);
+    updateVh();
+    window.addEventListener('resize', updateVh);
+    window.addEventListener('orientationchange', updateVh);
+    // A second read shortly after rotation catches browsers that fire
+    // the event before their own layout/viewport metrics have settled.
+    const t = setTimeout(updateVh, 250);
+    return () => {
+      window.removeEventListener('resize', updateVh);
+      window.removeEventListener('orientationchange', updateVh);
+      clearTimeout(t);
+    };
+  }, []);
+
   const [activeTool, setActiveTool] = useState('atom');
   const [activeElement, setActiveElement] = useState('C');
   const [atomScale, setAtomScale] = useState(1);
@@ -476,7 +502,10 @@ export default function DrawLabPage() {
   };
 
   return (
-    <div className="dl-page flex h-[100svh] flex-col overflow-hidden bg-lab-950">
+    <div
+      className="dl-page flex h-[100svh] flex-col overflow-hidden bg-lab-950"
+      style={{ height: vh ? `${vh}px` : undefined }}
+    >
       {showIntro && <DrawLabIntro onFinish={() => setShowIntro(false)} />}
 
       {/* Ambient glow — purely atmospheric, sits behind everything at
@@ -543,8 +572,8 @@ export default function DrawLabPage() {
       </header>
       <div className="dl-scanline" aria-hidden="true" />
 
-      <div className="relative z-[1] flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 md:flex-row">
-        <aside className="dl-panel order-2 flex w-full flex-col overflow-hidden rounded-2xl border border-lab-700 bg-lab-900 md:order-1 md:h-full md:w-64 md:overflow-y-auto">
+      <div className="dl-workspace relative z-[1] flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 md:flex-row">
+        <aside className="dl-panel dl-side-panel order-2 flex w-full flex-col overflow-hidden rounded-2xl border border-lab-700 bg-lab-900 md:order-1 md:h-full md:w-64 md:overflow-y-auto">
           <AtomPalette activeElement={activeElement} setActiveElement={setActiveElement} />
           <Inspector
             selection={selection}
@@ -567,7 +596,7 @@ export default function DrawLabPage() {
           />
         </aside>
 
-        <main className="dl-panel order-1 md:order-2 flex-1 flex flex-col min-h-[420px] overflow-hidden rounded-2xl border border-lab-700">
+        <main className="dl-panel dl-canvas-panel order-1 md:order-2 flex-1 flex flex-col min-h-0 overflow-hidden rounded-2xl border border-lab-700">
           <Toolbar
             activeTool={activeTool}
             setActiveTool={setActiveTool}
@@ -633,7 +662,7 @@ export default function DrawLabPage() {
             reserve a wide chunk of the layout for a permanently "zoomed
             in" inline view. Keeping it slim here is what actually gives
             DrawCanvas (the main attraction) the extra horizontal room. */}
-        <aside className="dl-panel order-3 w-full shrink-0 overflow-hidden rounded-2xl border border-lab-700 bg-lab-900 p-2.5 md:h-full md:w-56 md:overflow-y-auto lg:w-64">
+        <aside className="dl-panel dl-side-panel order-3 w-full shrink-0 overflow-hidden rounded-2xl border border-lab-700 bg-lab-900 p-2.5 md:h-full md:w-56 md:overflow-y-auto lg:w-64">
           <button
             onClick={() => setShow3D((s) => !s)}
             className="dl-panel-header mb-2 w-full font-display text-xs font-semibold uppercase tracking-wider text-lab-400"

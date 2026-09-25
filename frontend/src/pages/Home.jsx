@@ -14,6 +14,7 @@ import {
   FlaskConical,
   Activity,
   CheckCircle2,
+  Monitor,
 } from 'lucide-react';
 import HeroMolecule from '../components/home/HeroMolecule';
 import HeroMarqueeGallery from '../components/HeroMarqueeGallery';
@@ -570,6 +571,13 @@ export default function Home() {
             <a href="#wall" onClick={scrollTo('wall')} className="ix-scroll">
               Scroll <ArrowDown size={14} />
             </a>
+
+            <Reveal trigger="mount" delay={0.55} duration={0.7}>
+              <p className="ix-hero__note">
+                <Monitor size={14} />
+                Best experienced on a computer or laptop
+              </p>
+            </Reveal>
           </div>
 
           {/* the ring the road grows out of — the atom sits inside it */}

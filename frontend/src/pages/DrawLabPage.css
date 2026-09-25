@@ -107,3 +107,75 @@
     animation: none;
   }
 }
+
+/* --- Phone landscape ("rotate your phone" screen) -----------------------
+ * Once the device is turned sideways, `needsRotate` clears and the
+ * 3-pane desktop layout takes over — but a phone in landscape is still a
+ * SHORT viewport (roughly 320–430px tall, vs. 600px+ for a tablet or
+ * laptop even in landscape), and the desktop layout was never designed
+ * for that little vertical room:
+ *   - <main> carried a hardcoded 420px min-height, forcing the canvas
+ *     panel taller than the actual space available.
+ *   - The toolbar's control row was allowed to `flex-wrap`, so once the
+ *     canvas panel got squeezed narrow (palette + 3D preview both eating
+ *     into a short phone's limited width), it wrapped onto 5 stacked
+ *     rows instead of 1, ballooning required height even further.
+ *   - The page's outer `overflow-hidden` then silently clipped whatever
+ *     didn't fit, which is what read as "totally crashing".
+ *
+ * This block keys off viewport HEIGHT, not width, so it only ever
+ * targets that short-phone-landscape case — tablets/desktops (always
+ * taller than 560px even in landscape) are completely unaffected. */
+@media (max-height: 560px) {
+  .dl-header {
+    padding-top: 0.35rem;
+    padding-bottom: 0.35rem;
+  }
+  .dl-workspace {
+    padding: 0.4rem;
+    gap: 0.4rem;
+  }
+  /* Give the canvas panel back its floor once there's actually 560px+ of
+     height to spare (see the rule right after this block) — down here,
+     let it shrink to whatever the viewport can give it. */
+  .dl-canvas-panel {
+    min-height: 0 !important;
+  }
+  /* Side panels (element palette, 3D preview) were fixed desktop widths
+     (256px / 224–256px). On a phone that's landscape-wide but still
+     narrow overall, that leaves the canvas panel too squeezed for the
+     toolbar to lay out in one row. Capping the side panels' share of the
+     width — as a fraction of the viewport, so it scales with the actual
+     phone rather than a fixed px guess — gives the canvas the room back. */
+  .dl-side-panel {
+    width: 34vw !important;
+    max-width: 220px !important;
+    flex-basis: 34vw !important;
+  }
+  /* The toolbar's control row (tools / scale slider / undo-redo-clear /
+     autocorrect / valid / export+save) is a single flex row on desktop
+     because there's enough width for it. Forcing it to stay a single,
+     horizontally-scrollable row here — instead of letting it wrap onto
+     up to 5 rows — is what actually gives the "screen fit, desktop-style"
+     feel back on a phone: it trades a small side-scroll on the toolbar
+     for keeping the canvas itself tall and usable. */
+  .dl-toolbar-row {
+    flex-wrap: nowrap !important;
+    overflow-x: auto;
+    padding-top: 0.3rem;
+    padding-bottom: 0.3rem;
+  }
+  /* Safety net: if the toolbar + canvas still can't both fit in the
+     available height on a particularly small phone, scroll the panel
+     instead of silently clipping it off — a scrollbar is a much better
+     failure mode than content vanishing under an invisible cutoff. */
+  .dl-canvas-panel {
+    overflow-y: auto !important;
+  }
+}
+
+@media (min-height: 561px) {
+  .dl-canvas-panel {
+    min-height: 420px;
+  }
+}

@@ -58,7 +58,7 @@ export default function Toolbar({
   const hasIssues = validationIssues.length > 0;
   return (
     <div className="flex flex-col border-b border-lab-700 bg-gradient-to-b from-lab-900 to-lab-900/70 shadow-[0_1px_0_0_rgba(94,234,212,0.06)]">
-      <div className="flex flex-wrap items-center gap-2 px-3 py-2.5">
+      <div className="dl-toolbar-row flex flex-wrap items-center gap-2 px-3 py-2.5">
         <div className="flex min-w-0 items-center gap-1 overflow-x-auto rounded-xl border border-lab-700 bg-lab-850/80 p-1 shadow-inner">
           {TOOL_GROUPS.map((group, gi) => (
             <div key={gi} className="flex shrink-0 items-center gap-1">
