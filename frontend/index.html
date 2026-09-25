@@ -16,28 +16,32 @@
       rel="stylesheet"
     />
     <script>
-      // The homepage is now light. Flag it before first paint so the splash
-      // and the page background don't flash dark on "/". Home.jsx removes
-      // this class again when you navigate away.
-      if (location.pathname === '/') document.documentElement.classList.add('theme-indisea');
+      // Several pages use the light "paper" theme, not just the homepage —
+      // see LIGHT_CANVAS_PATHS in App.jsx. Each of those pages only adds
+      // .theme-indisea itself once React has mounted (via its own
+      // useEffect), which left a ~1s dark flash on refresh for every one of
+      // them except "/". Flag all of them here, synchronously, before the
+      // first paint, so there's nothing to flash at all — just the splash
+      // logo sitting on the correct background the whole time.
+      var LIGHT_CANVAS_PATHS = ['/', '/login', '/register', '/functional-groups', '/group-theory'];
+      if (LIGHT_CANVAS_PATHS.indexOf(location.pathname) !== -1) {
+        document.documentElement.classList.add('theme-indisea');
+      }
     </script>
     <meta name="description" content="Draw molecules, explore them in 3D, and study a library of famous compounds." />
 
     <!--
-      Set the page background dark immediately, before the app's own
-      bundled CSS (index.css) has loaded — otherwise the browser paints
-      its default white background for that first instant. This is what
-      was showing through behind the loading logo, not the loader
-      element itself (which stays fully transparent, per the "just the
-      logo" request below).
+      No forced background color here — explicitly transparent. Note that
+      "transparent" and "no rule at all" render identically: there's nothing
+      behind a browser tab's content area except its own default canvas
+      (white), so transparent just reveals that same white. There's no way
+      to get a background *other* than white without painting one on
+      ourselves — which is the flash this is specifically trying to avoid.
     -->
     <style>
       html, body {
         margin: 0;
-        background-color: #0a0e0f;
-      }
-      html.theme-indisea, html.theme-indisea body {
-        background-color: #f0edea;
+        background: transparent;
       }
     </style>
 
