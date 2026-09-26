@@ -86,6 +86,12 @@ def fetch_external_compound(payload: schemas.CompoundFetchRequest, db: Session =
             raise NotFoundError(f"PubChem has no record matching \u201c{query}\u201d. Check the spelling, or try the formula.")
         except pubchem.PubChemServiceError as exc:
             raise UpstreamServiceError(f"PubChem returned unusable data: {exc}")
+        except pubchem.DeadlineExceeded:
+            # Network layer stalled (most commonly DNS) past our hard
+            # wall-clock cap -- see app/net.py. Same user-facing shape as
+            # "couldn't reach PubChem", since from the caller's
+            # perspective that's exactly what happened.
+            raise UpstreamUnavailableError("Couldn't reach PubChem right now (it took too long to respond). Please try again.")
         except _requests.RequestException:
             raise UpstreamUnavailableError("Couldn't reach PubChem right now. Check your connection and try again.")
 
@@ -274,6 +280,8 @@ def resolve_match(payload: schemas.CompoundMatchResolve, db: Session = Depends(g
             raise NotFoundError("PubChem no longer has a record for this compound.")
         except pubchem.PubChemServiceError as exc:
             raise UpstreamServiceError(f"PubChem returned unusable data: {exc}")
+        except pubchem.DeadlineExceeded:
+            raise UpstreamUnavailableError("Couldn't reach PubChem right now (it took too long to respond). Please try again.")
         except _requests.RequestException:
             raise UpstreamUnavailableError("Couldn't reach PubChem right now. Check your connection and try again.")
 

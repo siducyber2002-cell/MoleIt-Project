@@ -25,6 +25,8 @@ from urllib.parse import quote
 
 import requests
 
+from .net import DeadlineExceeded, run_with_deadline
+
 PUG_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 PUG_VIEW_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug_view"
 # (connect_timeout, read_timeout). See routers/symmetry.py for why this is
@@ -1134,10 +1136,25 @@ def _record_from_cid(cid: int, *, query_for_common_name: str | None = None) -> d
     }
 
 
+# Hard wall-clock cap for a full compound fetch (name resolution +
+# properties/description/2D/3D/synonyms/physical-properties, some of
+# which run concurrently -- see _record_from_cid). Generous enough for a
+# genuinely slow-but-working PubChem round trip, but bounded: see net.py
+# for why `timeout=` on the individual requests calls isn't enough on its
+# own to guarantee this function returns.
+_FETCH_DEADLINE_SECONDS = 45
+
+
 def build_compound_record(query: str) -> dict:
     """Resolve `query` (a free-text name) against PubChem and return a dict
     with the same keys as a row in compounds_seed.json, ready to hand to
     the Compound model."""
+    return run_with_deadline(
+        _build_compound_record_by_name, query, timeout=_FETCH_DEADLINE_SECONDS
+    )
+
+
+def _build_compound_record_by_name(query: str) -> dict:
     cid = find_cid(query)
     return _record_from_cid(cid, query_for_common_name=query)
 
@@ -1147,4 +1164,4 @@ def build_compound_record_by_cid(cid: int) -> dict:
     which CID we want (e.g. the user picked one of several "did you
     mean...?" suggestions) instead of resolving a name that could be
     ambiguous."""
-    return _record_from_cid(cid)
+    return run_with_deadline(_record_from_cid, cid, timeout=_FETCH_DEADLINE_SECONDS)

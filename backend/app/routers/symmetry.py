@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from .. import symmetry_engine as engine
 from ..exceptions import BadRequestError, UpstreamServiceError, UpstreamUnavailableError
 from ..logging_config import get_logger
+from ..net import DeadlineExceeded, run_with_deadline
 from ..responses import ok, err
 
 logger = get_logger(__name__)
@@ -151,8 +152,16 @@ def analyze_from_pubchem(payload: PubchemRequest):
     try:
         if not query:
             raise BadRequestError("Enter a PubChem compound name or CID.")
-        cid = query if query.isdigit() else _resolve_cid(query)
-        sdf, quality = _fetch_sdf_with_fallback(cid)
+        cid_hint = query if query.isdigit() else None
+        # Wrapped in a hard wall-clock deadline -- see net.py. The retry
+        # logic in _get_with_retry already bounds each individual HTTP
+        # call, but that bound assumes the network layer honors
+        # `timeout=` at all; DNS stalls don't. This is the outer safety
+        # net that guarantees this endpoint always responds instead of
+        # hanging indefinitely (the bug just reported).
+        cid, sdf, quality = run_with_deadline(
+            _resolve_and_fetch, query, cid_hint, timeout=_PUBCHEM_DEADLINE_SECONDS
+        )
         result = _run_analysis(sdf, payload.tolerance)
         result["pubchemCid"] = cid
         result["pubchemUrl"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
@@ -180,9 +189,25 @@ def analyze_from_pubchem(payload: PubchemRequest):
     except UpstreamUnavailableError as e:
         logger.warning("Symmetry PubChem unavailable | reason=%s", e)
         return err(503, str(e))
+    except DeadlineExceeded as e:
+        logger.warning("Symmetry PubChem timed out (deadline exceeded) | reason=%s", e)
+        return err(503, "PubChem took too long to respond (likely a network stall). Please try again.")
     except Exception:
         logger.error("Symmetry PubChem fetch crashed", exc_info=True)
         return err(500, "Internal server error")
+
+
+# Hard wall-clock cap for the whole resolve-name-to-CID + fetch-SDF chain.
+_PUBCHEM_DEADLINE_SECONDS = 45
+
+
+def _resolve_and_fetch(query: str, cid_hint: str | None) -> tuple[str, str, str]:
+    """Runs entirely inside run_with_deadline's worker thread. Returns
+    (cid, sdf, quality). Any BadRequestError / UpstreamServiceError /
+    UpstreamUnavailableError raised inside propagates through unchanged."""
+    cid = cid_hint or _resolve_cid(query)
+    sdf, quality = _fetch_sdf_with_fallback(cid)
+    return cid, sdf, quality
 
 
 def _resolve_cid(name: str) -> str:
