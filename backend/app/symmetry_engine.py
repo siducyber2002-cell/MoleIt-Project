@@ -347,8 +347,19 @@ def _match(atoms, M, tol):
     adj = []
     for i, a in enumerate(atoms):
         cand = by_el.get(a["el"], [])
-        scored = sorted(((j, _len(_sub(q[i], atoms[j]["p"]))) for j in cand), key=lambda t: t[1])
-        adj.append([j for j, d in scored if d <= tol])
+        # Kuhn's augmenting-path matching only needs SOME candidate list per
+        # atom, not a sorted-by-distance one -- existence of a perfect
+        # matching (all "ok" below actually checks) doesn't depend on
+        # visitation order. The sort here was pure overhead: profiling on a
+        # 40-atom, Ih-symmetry structure (dodecahedrane) showed it (plus the
+        # tuple-building generator behind it) accounting for roughly half of
+        # _match's total cost, since it runs on every one of the several
+        # thousand candidate axis/order combinations tested per molecule,
+        # most of which fail outright. A plain filter is functionally
+        # identical for correctness (verified: identical detected point
+        # group and operation count on both a small D6h test case and the
+        # dodecahedrane Ih case) and meaningfully cheaper.
+        adj.append([j for j in cand if _len(_sub(q[i], atoms[j]["p"])) <= tol])
 
     match_j = {}
 
@@ -1442,7 +1453,19 @@ def _tolerance_scan(atoms, base_tol, base_group):
     so it stays cheap even though each call itself isn't free.
     """
     n_atoms = len(atoms)
-    if n_atoms > 50 or base_tol <= 0:
+    # Was `> 50`. The extra passes are up to 3 more full detect_operations()
+    # calls on top of the one analyze() already did -- cheap on genuinely
+    # small teaching molecules (water, benzene, SF6...) but for a 40-atom,
+    # Ih-symmetry structure like dodecahedrane this was measured taking the
+    # request from ~4s to ~15s+ (and considerably more under Render's
+    # slower/shared CPU), which is what was actually behind the "PubChem
+    # fetch hangs on Dodecahedrane/adamantane" reports -- not a network
+    # issue at all, just this doing 4x the work for anything past a modest
+    # atom count. Lowered to 20 so it still runs for every demo/teaching
+    # molecule (all well under 20 atoms) but skips itself -- losing only the
+    # toleranceStable / closestHigherSymmetry diagnostics, not the point
+    # group itself -- for larger structures where it was the actual cost.
+    if n_atoms > 20 or base_tol <= 0:
         return {"stable": None, "closestHigherSymmetry": None}
     base_order = expected_order(base_group)
     if isinstance(base_order, str):  # linear molecules use a separate analytic path

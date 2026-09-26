@@ -111,9 +111,21 @@ class PubchemRequest(BaseModel):
     tolerance: float | None = Field(None, ge=0.001, le=1.0)
 
 
+# Hard wall-clock cap for the symmetry-detection engine itself. See
+# run_with_deadline in net.py -- same pattern, applied here because the
+# engine's runtime scales with atom count/symmetry richness and, unlike the
+# PubChem network calls, had no bound at all before this.
+_ANALYSIS_DEADLINE_SECONDS = 40
+
+
 def _run_analysis(structure_text: str, tolerance: float | None):
     try:
-        return engine.analyze(structure_text, tolerance or engine.TOL_DEFAULT)
+        # Even with the engine speedups above, a large/unusually symmetric
+        # pasted structure (a fullerene, a bigger cluster) could still take
+        # a while -- this is the same hard-deadline pattern used for the
+        # PubChem network calls, applied to the analysis step itself, which
+        # was previously the one part of this endpoint with no cap at all.
+        return run_with_deadline(engine.analyze, structure_text, tolerance or engine.TOL_DEFAULT, timeout=_ANALYSIS_DEADLINE_SECONDS)
     except engine.SymmetryError as e:
         raise BadRequestError(str(e))
 
@@ -134,6 +146,9 @@ def analyze_structure(payload: AnalyzeRequest):
     except BadRequestError as e:
         logger.warning("Symmetry analyze failed | reason=%s", e)
         return err(400, str(e))
+    except DeadlineExceeded as e:
+        logger.warning("Symmetry analyze timed out (deadline exceeded) | reason=%s", e)
+        return err(503, "This structure's exact symmetry search took too long (likely a large and/or highly symmetric structure). Try a larger tolerance, or a smaller/simplified structure.")
     except Exception:
         logger.error("Symmetry analyze crashed", exc_info=True)
         return err(500, "Internal server error")
