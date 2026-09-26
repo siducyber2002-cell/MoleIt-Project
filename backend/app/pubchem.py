@@ -20,6 +20,7 @@ so a given name/CID only ever hits PubChem once.
 import re
 import time
 import math
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 import requests
@@ -27,10 +28,30 @@ import requests
 PUG_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 PUG_VIEW_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug_view"
 TIMEOUT = 12
+# PUG View's physical-properties record is the slowest single endpoint we
+# call (it returns the whole compound "document" as a nested Section tree,
+# which we then walk) and, per _fetch_physical_properties below, is
+# explicitly best-effort — a normal, expected empty result for most
+# compounds. It runs concurrently with everything else now, but giving it
+# its own short timeout means one slow/absent PUG View record can't become
+# the long pole for the whole fetch; it just comes back empty faster.
+PHYSICAL_TIMEOUT = 5
 # How much to scale PubChem's real atomic-coordinate units (roughly
 # angstroms, ~1.5 per bond) up into the pixel-ish units the Draw Lab's
 # structure_2d canvas already uses elsewhere (e.g. a 50px C-O bond).
 COORD_SCALE = 38
+
+# A shared, connection-pooling Session instead of bare `requests.get()`.
+# Every PubChem call in this module hits the same host — without a shared
+# Session, each one of those 6 concurrent calls in _record_from_cid opens
+# and TLS-handshakes its own fresh TCP connection to
+# pubchem.ncbi.nlm.nih.gov. Reusing a pooled, keep-alive Session lets
+# later calls (and later requests from other users) skip that handshake
+# entirely, which is a real, consistent latency win on top of running the
+# calls concurrently.
+_session = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+_session.mount("https://", _adapter)
 
 
 class PubChemNotFoundError(Exception):
@@ -42,7 +63,8 @@ class PubChemServiceError(Exception):
 
 
 def _get(url, **kwargs):
-    resp = requests.get(url, timeout=TIMEOUT, **kwargs)
+    kwargs.setdefault("timeout", TIMEOUT)
+    resp = _session.get(url, **kwargs)
     if resp.status_code == 404:
         raise PubChemNotFoundError()
     resp.raise_for_status()
@@ -364,7 +386,7 @@ def _fetch_physical_properties(cid: int) -> dict:
     empty dict here is a normal, expected outcome, not an error, so every
     caller treats these fields as optional."""
     try:
-        data = _get_json(f"{PUG_VIEW_BASE}/data/compound/{cid}/JSON")
+        data = _get_json(f"{PUG_VIEW_BASE}/data/compound/{cid}/JSON", timeout=PHYSICAL_TIMEOUT)
     except (PubChemNotFoundError, PubChemServiceError, requests.RequestException):
         return {}
     sections = data.get("Record", {}).get("Section", [])
@@ -980,12 +1002,33 @@ def classify_category(formula: str, mol_block: str | None) -> str:
 def _record_from_cid(cid: int, *, query_for_common_name: str | None = None) -> dict:
     """Shared by both name-based and CID-based resolution: given a CID we
     already trust, pulls properties/description/structure and builds a
-    dict with the same keys as a row in compounds_seed.json."""
-    props = _fetch_properties(cid)
-    description = _fetch_description(cid)
+    dict with the same keys as a row in compounds_seed.json.
 
-    sdf_3d = _fetch_sdf(cid, "3d")
-    sdf_2d = _fetch_sdf(cid, "2d")
+    The six PubChem lookups below (properties, description, 3D SDF, 2D
+    SDF, synonyms, PUG View physical properties) are all independent of
+    each other -- none needs another's result -- so they used to be fired
+    off one after another, each paying its own full network round trip.
+    Firing them concurrently instead means the whole function takes
+    roughly as long as the single slowest call (usually PUG View) rather
+    than the sum of all six, which was regularly pushing a single fetch
+    past 45-60s and blowing through the frontend's axios timeout even
+    though PubChem itself was answering every request just fine.
+    """
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        f_props = pool.submit(_fetch_properties, cid)
+        f_description = pool.submit(_fetch_description, cid)
+        f_sdf_3d = pool.submit(_fetch_sdf, cid, "3d")
+        f_sdf_2d = pool.submit(_fetch_sdf, cid, "2d")
+        f_synonyms = pool.submit(_fetch_synonyms, cid)
+        f_physical = pool.submit(_fetch_physical_properties, cid)
+
+        props = f_props.result()
+        description = f_description.result()
+        sdf_3d = f_sdf_3d.result()
+        sdf_2d = f_sdf_2d.result()
+        synonyms, cas_number = f_synonyms.result()
+        physical = f_physical.result()
+
     if not sdf_3d and not sdf_2d:
         raise PubChemServiceError("PubChem has no structure record for this compound")
 
@@ -1001,9 +1044,6 @@ def _record_from_cid(cid: int, *, query_for_common_name: str | None = None) -> d
     geometry_centers: list = []
     if sdf_3d:
         geometry_desc, hybridization_desc, bonding_notes, geometry_centers = compute_geometry_summary(sdf_3d)
-
-    synonyms, cas_number = _fetch_synonyms(cid)
-    physical = _fetch_physical_properties(cid)
 
     name = props.get("Title") or (query_for_common_name or "").strip().title() or f"CID {cid}"
     formula = props.get("MolecularFormula") or "?"
