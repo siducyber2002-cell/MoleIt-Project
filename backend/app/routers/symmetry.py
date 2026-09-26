@@ -10,6 +10,7 @@ PubChem 3-D structure proxy, so the browser never needs to talk to
 PubChem directly (no CORS, and it keeps the tolerance/engine logic
 server-side rather than duplicated in the client).
 """
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 import requests
@@ -27,6 +28,12 @@ router = APIRouter(prefix="/api/symmetry", tags=["symmetry"])
 
 PUG_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 PUBCHEM_TIMEOUT = 12
+
+# Shared, connection-pooling Session (mirrors pubchem.py) instead of bare
+# requests.get() — every call here hits the same PubChem host, so reusing
+# one pooled, keep-alive Session skips a fresh TCP/TLS handshake per call.
+_session = requests.Session()
+_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20))
 
 
 class AnalyzeRequest(BaseModel):
@@ -138,7 +145,7 @@ def _resolve_cid(name: str) -> str:
         return cid
 
     try:
-        resp = requests.get(
+        resp = _session.get(
             f"https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/{quote(name)}/json",
             params={"limit": 1},
             timeout=PUBCHEM_TIMEOUT,
@@ -158,7 +165,7 @@ def _resolve_cid(name: str) -> str:
 def _lookup_cid_exact(name: str) -> str | None:
     url = f"{PUG_BASE}/compound/name/{quote(name)}/cids/JSON"
     try:
-        resp = requests.get(url, timeout=PUBCHEM_TIMEOUT)
+        resp = _session.get(url, timeout=PUBCHEM_TIMEOUT)
     except requests.RequestException:
         raise UpstreamUnavailableError("Could not reach PubChem.")
     if resp.status_code == 404:
@@ -172,11 +179,21 @@ def _lookup_cid_exact(name: str) -> str | None:
 def _fetch_sdf_with_fallback(cid: str) -> tuple[str, str]:
     """Returns (sdf_text, quality) where quality is "3d" (real geometry,
     safe for symmetry analysis) or "2d-fallback" (flattened depiction,
-    caller must warn). Only raises when PubChem has neither."""
-    sdf_3d = _fetch_sdf(cid, "3d")
+    caller must warn). Only raises when PubChem has neither.
+
+    Fetches the 3-D and 2-D records concurrently rather than trying 3-D,
+    waiting for it to fail, and only then starting the 2-D request — a
+    missing 3-D conformer is a common, expected case (not an error), and
+    the old sequential version paid a full request's worth of latency for
+    every compound that hit that fallback path.
+    """
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_3d = pool.submit(_fetch_sdf, cid, "3d")
+        f_2d = pool.submit(_fetch_sdf, cid, "2d")
+        sdf_3d = f_3d.result()
+        sdf_2d = f_2d.result()
     if sdf_3d:
         return sdf_3d, "3d"
-    sdf_2d = _fetch_sdf(cid, "2d")
     if sdf_2d:
         return sdf_2d, "2d-fallback"
     raise UpstreamServiceError(f"PubChem has no structure record at all for CID {cid}.")
@@ -185,7 +202,7 @@ def _fetch_sdf_with_fallback(cid: str) -> tuple[str, str]:
 def _fetch_sdf(cid: str, record_type: str) -> str | None:
     url = f"{PUG_BASE}/compound/cid/{quote(cid)}/SDF"
     try:
-        resp = requests.get(url, params={"record_type": record_type}, timeout=PUBCHEM_TIMEOUT)
+        resp = _session.get(url, params={"record_type": record_type}, timeout=PUBCHEM_TIMEOUT)
     except requests.RequestException:
         raise UpstreamUnavailableError("Could not reach PubChem.")
     if resp.status_code == 404:
