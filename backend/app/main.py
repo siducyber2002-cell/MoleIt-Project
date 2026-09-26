@@ -105,6 +105,16 @@ def _backfill_pubchem_categories(db):
 
 @app.on_event("startup")
 def on_startup():
+    # BUG FIX: this used to `raise` on any failure here, which — under
+    # FastAPI/Uvicorn — aborts ASGI lifespan startup and takes the entire
+    # process down before it ever binds a port. That meant a single bad
+    # dependency (most commonly: the Postgres/Supabase DB being paused,
+    # asleep, or briefly unreachable) didn't just break DB-backed routes —
+    # it took down routes that don't touch the database at all, including
+    # the Group Theory / PubChem symmetry endpoints (/api/symmetry/*),
+    # which are otherwise fully self-contained. Now a startup failure here
+    # is logged loudly but never prevents the API from coming up, so those
+    # DB-independent routes keep working even if the database is down.
     logger.info("Application startup: creating tables / running migrations")
     try:
         Base.metadata.create_all(bind=engine)
@@ -117,8 +127,13 @@ def on_startup():
             db.close()
         logger.info("Application startup complete")
     except Exception:
-        logger.error("Application startup failed", exc_info=True)
-        raise
+        logger.error(
+            "Application startup failed while initializing the database. "
+            "The API will still come up and serve database-independent "
+            "routes (e.g. /api/symmetry/*), but anything touching the "
+            "database will error until this is fixed.",
+            exc_info=True,
+        )
 
 
 app.include_router(auth_router.router)

@@ -62,13 +62,44 @@ class PubChemServiceError(Exception):
     """PubChem reached but returned something we couldn't use."""
 
 
+# BUG FIX: every PubChem call used to be a single-shot GET with no retry at
+# all. PubChem's own PUG REST documentation is explicit that a busy server
+# answers with HTTP 503 and a body like
+# {"Fault": {"Code": "PUGREST.ServerBusy", ...}} and that clients are
+# expected to back off and retry rather than treat that as a hard failure.
+# Previously that transient (and common, e.g. right after a cold start when
+# several requests land close together) 503 immediately surfaced to the user
+# as "could not fetch that compound" even though the very next attempt,
+# moments later, would usually succeed. Same idea for a dropped connection
+# (requests.RequestException) - one flaky handshake shouldn't fail the whole
+# lookup. This retries a handful of times with a short exponential backoff
+# before giving up for real.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF_BASE = 0.6  # seconds; doubles each attempt (0.6s, 1.2s)
+
+
 def _get(url, **kwargs):
     kwargs.setdefault("timeout", TIMEOUT)
-    resp = _session.get(url, **kwargs)
-    if resp.status_code == 404:
-        raise PubChemNotFoundError()
-    resp.raise_for_status()
-    return resp
+    last_exc = None
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            resp = _session.get(url, **kwargs)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < _MAX_ATTEMPTS - 1:
+                time.sleep(_RETRY_BACKOFF_BASE * (2 ** attempt))
+                continue
+            raise
+        if resp.status_code == 404:
+            raise PubChemNotFoundError()
+        if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_ATTEMPTS - 1:
+            time.sleep(_RETRY_BACKOFF_BASE * (2 ** attempt))
+            continue
+        resp.raise_for_status()
+        return resp
+    # Only reachable if every attempt raised a RequestException.
+    raise last_exc
 
 
 def _get_json(url, **kwargs):
