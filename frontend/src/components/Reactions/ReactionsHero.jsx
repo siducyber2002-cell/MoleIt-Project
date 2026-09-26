@@ -97,14 +97,14 @@ function FlaskBubbles() {
       type="button"
       onClick={handleClick}
       aria-label="Fizz the flask"
-      className="absolute left-[10.5rem] top-[0.35rem] h-9 w-9 cursor-pointer sm:left-[16rem] sm:top-[1.8rem] sm:h-16 sm:w-16"
+      className="relative ml-2 inline-flex h-8 w-8 shrink-0 -translate-y-1 cursor-pointer align-middle sm:ml-4 sm:h-14 sm:w-14 sm:-translate-y-2"
     >
       <motion.div
         animate={controls}
-        className="relative flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-fuchsia-400 shadow-lg shadow-fuchsia-900/50 ring-4 ring-lab-950/60 sm:h-16 sm:w-16"
+        className="relative flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-fuchsia-400 shadow-lg shadow-fuchsia-900/50 ring-4 ring-lab-950/60 sm:h-14 sm:w-14"
       >
-        <FlaskConical size={18} className="text-white sm:hidden" />
-        <FlaskConical size={24} className="hidden text-white sm:block" />
+        <FlaskConical size={16} className="text-white sm:hidden" />
+        <FlaskConical size={22} className="hidden text-white sm:block" />
 
         {steadyBubbles.map((i) => (
           <motion.span
@@ -156,7 +156,7 @@ export default function ReactionsHero({ reactions = [], onSelect, loading }) {
             <span className="h-2 w-2 rounded-full bg-purple-400" /> Reaction Library
           </span>
 
-          <div className="relative mt-4 w-fit max-w-2xl sm:mt-5">
+          <div className="mt-4 w-fit max-w-2xl sm:mt-5">
             <h1 className="font-display text-4xl font-bold leading-[1.05] tracking-tight sm:text-7xl sm:leading-[1.02] lg:text-8xl">
               <GlitchText
                 as="span"
@@ -170,8 +170,8 @@ export default function ReactionsHero({ reactions = [], onSelect, loading }) {
                 text="on demand."
                 delayMs={180}
               />
+              <FlaskBubbles />
             </h1>
-            <FlaskBubbles />
           </div>
 
           <p className="mt-4 max-w-md text-sm leading-relaxed text-lab-400 sm:mt-6 sm:text-base lg:text-lg">
