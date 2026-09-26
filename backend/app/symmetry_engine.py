@@ -447,6 +447,43 @@ def _axis_candidates(atoms):
         for j in range(i + 1, len(atoms)):
             a, b = atoms[i]["p"], atoms[j]["p"]
             dirs.append(_add(a, b)); dirs.append(_sub(a, b)); dirs.append(_cross(a, b))
+    # Triangular-face centroid/normal directions: needed for any polyhedral
+    # point group whose Cn axis passes through the middle of a face rather
+    # than through any single vertex or any 2-atom combination above — the
+    # defining case being an icosahedron's C3 axes (through the centroid of
+    # each of its 20 triangular faces, e.g. a real B12H12^2- cluster) or a
+    # C60 fullerene's C3 axes (through its 20 hexagonal-ring centroids).
+    # Without these, only a partial, geometry-dependent subset of the true
+    # C3 axes get found (confirmed: a regular B12 icosahedron was finding
+    # only 8 of its 20 C3 rotations and, falling short of the Ih/I
+    # detection threshold, was misclassified as Th).
+    #
+    # A real polyhedral face's vertices are, by definition, mutually close
+    # together — so instead of every combination of same-element atoms
+    # (cubic in atom count, and C60's 60 carbons alone would be 34,220
+    # triples before this molecule has done anything else), each atom only
+    # pairs with its own nearest same-element neighbors. That is linear in
+    # atom count and still finds every genuine face — a face's vertices
+    # are each other's nearest neighbors by construction — while an
+    # ordinary large asymmetric organic molecule, which has no faces to
+    # find, pays only a small fixed neighbor-search cost per atom.
+    NEARBY_K = 4
+    by_element = {}
+    for a in atoms:
+        by_element.setdefault(a["el"], []).append(a["p"])
+    for el, pts in by_element.items():
+        n = len(pts)
+        if n < 3:
+            continue
+        for i in range(n):
+            dists = sorted(range(n), key=lambda j: _len(_sub(pts[j], pts[i])) if j != i else float("inf"))
+            neighbors = dists[:NEARBY_K]
+            for a in range(len(neighbors)):
+                for b in range(a + 1, len(neighbors)):
+                    j, k = neighbors[a], neighbors[b]
+                    p, q, s = pts[i], pts[j], pts[k]
+                    dirs.append(_add(p, _add(q, s)))  # centroid direction
+                    dirs.append(_cross(_sub(q, p), _sub(s, p)))  # face normal
     Imat = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     for a in atoms:
         x, y, z = a["p"]
@@ -584,7 +621,13 @@ def detect_operations(atoms, tol):
     all_ops = []
     for o in ops.values():
         d = _det3(o["M"])
-        all_ops.append({"M": o["M"], "det": 1 if d > 0 else -1, "trace": _trace(o["M"])})
+        # "error" (the real match deviation for this confirmed operation,
+        # set by _add_op below) was never carried over into this list —
+        # classify()'s max_error calculation reads o.get("error", 0) on
+        # *this* list, so it was silently always defaulting to 0 no matter
+        # how loose the actual matches were. That's the "Max match error"
+        # stat the UI has always shown as 0.0000 \u00c5 regardless of input.
+        all_ops.append({"M": o["M"], "det": 1 if d > 0 else -1, "trace": _trace(o["M"]), "error": o.get("error", 0)})
     result = classify(R, all_ops, tol)
     result["all"] = all_ops
     result["base_ops"] = len(all_ops)
@@ -1315,6 +1358,55 @@ def linear_symmetry(atoms, result, tol):
     }
 
 
+POINT_GROUP_INFO = {
+    "C1": "No symmetry at all beyond the identity — every atom is in a chemically unique position. Most real, flexible organic molecules (including nearly all drugs) land here once you look at an actual 3-D conformer.",
+    "Cs": "A single mirror plane and nothing else. Common for molecules that are almost, but not quite, symmetric — e.g. a planar molecule with one substituent breaking an otherwise-present axis.",
+    "Ci": "Only a center of inversion. Genuinely rare as the *full* symmetry of a real molecule (usually a higher group is also present), e.g. meso-tartaric acid in one conformation.",
+    "C2": "A single 2-fold rotation axis, no mirrors. Example: hydrogen peroxide (H2O2) in its skewed gas-phase conformation.",
+    "C3": "A single 3-fold rotation axis, no mirrors — chiral. Example: a propeller-twisted triarylphosphine.",
+    "C4": "A single 4-fold rotation axis, no mirrors — chiral.",
+    "C5": "A single 5-fold rotation axis, no mirrors — chiral.",
+    "C6": "A single 6-fold rotation axis, no mirrors — chiral.",
+    "C2v": "A C2 axis plus two mirror planes containing it. The classic bent-triatomic group. Example: water (H2O).",
+    "C3v": "A C3 axis plus three mirror planes containing it. Example: ammonia (NH3), or any simple trigonal-pyramidal molecule.",
+    "C4v": "A C4 axis plus four mirror planes. Example: a square-pyramidal molecule like BrF5, or xenon oxytetrafluoride.",
+    "C5v": "A C5 axis plus five mirror planes.",
+    "C6v": "A C6 axis plus six mirror planes.",
+    "C2h": "A C2 axis, a mirror plane perpendicular to it, and (as a consequence) an inversion center. Example: trans-1,2-dichloroethylene.",
+    "C3h": "A C3 axis with a horizontal mirror plane, no vertical mirrors. Example: boric acid B(OH)3 in its planar propeller form.",
+    "C4h": "A C4 axis with a horizontal mirror plane and an inversion center.",
+    "C5h": "A C5 axis with a horizontal mirror plane.",
+    "C6h": "A C6 axis with a horizontal mirror plane and an inversion center.",
+    "D2": "Three mutually perpendicular C2 axes, no mirrors at all — chiral. Rare as a molecule's full symmetry (twistane is a classic example).",
+    "D3": "A C3 axis plus three perpendicular C2 axes, no mirrors — chiral. Example: tris-chelate complexes like [Cr(en)3]3+.",
+    "D4": "A C4 axis plus four perpendicular C2 axes, no mirrors — chiral.",
+    "D5": "A C5 axis plus five perpendicular C2 axes, no mirrors — chiral.",
+    "D6": "A C6 axis plus six perpendicular C2 axes, no mirrors — chiral.",
+    "D2h": "D2's three perpendicular C2 axes plus a mirror plane perpendicular to each one, and an inversion center. Example: ethylene (C2H4).",
+    "D3h": "A C3 axis, three perpendicular C2 axes, and a horizontal mirror plane (plus vertical ones). Example: boron trifluoride (BF3), or trigonal-bipyramidal PCl5.",
+    "D4h": "A C4 axis, four perpendicular C2 axes, and a horizontal mirror plane. Example: square-planar XeF4 or [PtCl4]2-.",
+    "D5h": "A C5 axis with a horizontal mirror plane. Example: eclipsed ferrocene, or the cyclopentadienide ion.",
+    "D6h": "A C6 axis with a horizontal mirror plane. Example: benzene (C6H6).",
+    "D2d": "D2's axes plus dihedral (diagonal) mirror planes instead of a horizontal one, and an S4 axis. Example: allene (H2C=C=CH2).",
+    "D3d": "D3's axes with diagonal mirrors and an S6 axis, no horizontal mirror. Example: staggered ethane (C2H6).",
+    "D4d": "D4's axes with diagonal mirrors and an S8 axis. Example: staggered (rotated) ferrocene-type sandwich geometry.",
+    "D5d": "D5's axes with diagonal mirrors and an S10 axis. Example: staggered ferrocene.",
+    "D6d": "D6's axes with diagonal mirrors and an S12 axis.",
+    "S4": "A single S4 improper rotation axis and nothing else (no separate mirror plane, no inversion). Example: certain spiro compounds.",
+    "S6": "A single S6 improper rotation axis, equivalent to a C3 axis plus an inversion center.",
+    "S8": "A single S8 improper rotation axis.",
+    "T": "The pure rotation subgroup of a tetrahedron (4 C3 + 3 C2 axes), no mirrors at all — chiral. Rare; arises in some propeller-twisted tetrahedral metal complexes.",
+    "Td": "Full tetrahedral symmetry — the 4 C3/3 C2 axes of T, plus 6 mirror planes and 3 S4 axes, no inversion center. Example: methane (CH4), or any regular tetrahedral AB4 molecule.",
+    "Th": "T's rotation axes plus an inversion center, 3 mirror planes, and S6 axes — but not the full mirror set of Td. Uncommon; seen in some octahedral-cage/cluster compounds.",
+    "O": "The pure rotation subgroup of an octahedron (3 C4 + 4 C3 + 6 C2 axes), no mirrors — chiral. Rare as a real molecule's exact symmetry.",
+    "Oh": "Full octahedral symmetry. Example: sulfur hexafluoride (SF6), or any regular octahedral AB6 molecule.",
+    "I": "The pure rotation subgroup of an icosahedron (6 C5 + 10 C3 + 15 C2 axes), no mirrors — chiral.",
+    "Ih": "Full icosahedral symmetry, the highest symmetry commonly discussed in chemistry. Example: buckminsterfullerene (C60), or dodecahedrane.",
+    "Cinfv": "Linear with no center of symmetry — one end is chemically different from the other. Example: hydrogen cyanide (HCN), or carbon monoxide (CO).",
+    "Dinfh": "Linear with a center of symmetry — both ends are equivalent. Example: carbon dioxide (CO2), or any homonuclear diatomic like N2.",
+}
+
+
 def analyze(text, tol=TOL_DEFAULT):
     tol = max(0.001, min(1, tol or TOL_DEFAULT))
     parsed = parse_structure(text)
@@ -1344,6 +1436,25 @@ def analyze(text, tol=TOL_DEFAULT):
         "rotationalOrders": lin["rotationalOrders"] if lin else result["unique"],
         "linear": result["linear"],
         "maxError": round(result.get("maxError", 0), 5),
+        # Symmetry score: how cleanly the detected operations actually held,
+        # relative to how much slack the tolerance allowed. 100% means every
+        # matched atom landed essentially exactly on its symmetry-equivalent
+        # position (maxError \u2248 0); it falls toward 0% as the worst-matching
+        # detected operation approaches the tolerance limit itself — i.e. a
+        # low score doesn't mean "wrong point group", it means "this
+        # geometry is noisy/distorted enough that some of what's reported
+        # is close to being a coin flip at this tolerance."
+        "symmetryScore": round(max(0.0, 100.0 * (1 - result.get("maxError", 0) / tol)), 1),
+        "distortionWarning": (
+            f"This structure is a bit rough: the worst-matching detected symmetry element is off by "
+            f"{round(result.get('maxError', 0), 3)} \u00c5, which is over half your {tol} \u00c5 tolerance. "
+            "The point group is probably still right, but a couple of the finer operations "
+            "(especially higher-order axes or mirrors) could be borderline — try a stricter "
+            "tolerance to see if the same group holds up, or use a cleaner/idealized geometry if you have one."
+            if (not result.get("linear")) and tol > 0 and result.get("maxError", 0) > 0.5 * tol
+            else None
+        ),
+        "groupDescription": POINT_GROUP_INFO.get(result["group"]),
         "atomCount": len(parsed["atoms"]),
         "bondCount": len(parsed["bonds"]),
         "atoms": [{"el": a["el"], "x": a["p"][0], "y": a["p"][1], "z": a["p"][2]} for a in parsed["atoms"]],
