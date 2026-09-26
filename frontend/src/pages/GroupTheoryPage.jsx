@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Orbit, Loader2, AlertTriangle, Search, ChevronDown, Sparkles,
-  RotateCcw, Info, Atom, Axis3d, Wand2, FileDown, ListTree, XCircle, Radio,
+  RotateCcw, Info, Atom, Axis3d, FileDown, ListTree, XCircle, Radio,
 } from 'lucide-react';
 import SymmetryElementsViewer, { KIND_META } from '../components/Viewer3D/SymmetryElementsViewer';
 import { Reveal, StaggerGroup, Word, InlineReveal } from '../components/motion/ScrollReveal';
@@ -149,6 +149,10 @@ export default function GroupTheoryPage() {
   // separate from `result` so the "point group not calculated yet" view
   // and the full report never get confused with each other.
   const [preview, setPreview] = useState(null);
+  // Which "load a structure" tab is showing — paste-a-structure or
+  // search-PubChem. Purely a UI toggle so both ways to load a molecule
+  // live in one card instead of two stacked ones.
+  const [loadMode, setLoadMode] = useState('paste');
   const [showDerivation, setShowDerivation] = useState(false);
   const [hoveredOp, setHoveredOp] = useState(null);
   const [pinnedOp, setPinnedOp] = useState(null);
@@ -306,15 +310,15 @@ export default function GroupTheoryPage() {
             </StaggerGroup>
 
             <Reveal trigger="mount" delay={0.2} as="p" className="mt-4 max-w-xl text-sm leading-relaxed text-[var(--gt-ink-soft)] sm:text-[15px]">
-              Paste a 3-D structure (XYZ, SDF/MOL, or PDB), or pull one straight from PubChem. This
-              engine finds the real symmetry operations of the geometry, classifies the point group
-              from them, and reduces the 3N Cartesian representation into
-              {' '}&Gamma;<sub>trans</sub> + &Gamma;<sub>rot</sub> + &Gamma;<sub>vib</sub>.
+              Real symmetry detection, not a lookup table — three steps and you&rsquo;re staring at a point group.
             </Reveal>
 
-            <Reveal trigger="mount" delay={0.3} className="mt-5 flex flex-wrap items-center gap-2">
-              <span className="gt-chip"><Wand2 size={12} /> Real operation detection, not a lookup table</span>
-              <span className="gt-chip"><Axis3d size={12} /> Rotate, hover, and play out each operation</span>
+            <Reveal trigger="mount" delay={0.28} className="gt-steps mt-5">
+              <span className="gt-step"><span className="gt-step-emoji" aria-hidden="true">🔍</span> Search or paste</span>
+              <span className="gt-step-arrow" aria-hidden="true">&rarr;</span>
+              <span className="gt-step"><span className="gt-step-emoji" aria-hidden="true">🧬</span> Spin it in 3-D</span>
+              <span className="gt-step-arrow" aria-hidden="true">&rarr;</span>
+              <span className="gt-step"><span className="gt-step-emoji" aria-hidden="true">⚡</span> Calculate</span>
             </Reveal>
           </div>
 
@@ -339,35 +343,68 @@ export default function GroupTheoryPage() {
         <div className="space-y-5">
           <div className="gt-section gt-section-light relative px-4 py-5 sm:px-5 sm:py-6">
             <div className="relative z-10">
-              <span className="gt-live-badge">
-                <span className="gt-live-dot" /> Live 3-D workspace
-              </span>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="gt-kicker text-[var(--gt-ink-soft)]"><span className="gt-kicker-num">02</span> Load a structure</span>
+                <div className="gt-tab-group">
+                  <button
+                    type="button"
+                    onClick={() => setLoadMode('paste')}
+                    className={`gt-tab ${loadMode === 'paste' ? 'is-active' : ''}`}
+                  >
+                    Paste
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLoadMode('pubchem')}
+                    className={`gt-tab ${loadMode === 'pubchem' ? 'is-active' : ''}`}
+                  >
+                    PubChem
+                  </button>
+                </div>
+              </div>
 
-              <h2 className="gt-heading mt-3 text-lg text-[var(--gt-ink)] sm:text-xl">
-                Find a molecule&rsquo;s point group
-              </h2>
-              <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--gt-ink)]/70">
-                Paste an XYZ, SDF/MOL or PDB structure. The solver searches the 3-D geometry for
-                rotations, reflections, inversion and improper rotations, generates the operation
-                group, and classifies the point group.
-              </p>
-
-              <label className="mb-2 mt-4 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink)]/80">
-                <Atom size={13} /> XYZ / SDF / PDB
-              </label>
-              <textarea
-                value={structure}
-                onChange={(e) => {
-                  setStructure(e.target.value);
-                  // Hand-editing the box invalidates any PubChem-sourced
-                  // preview/attribution — it's no longer the fetched structure.
-                  setPreview(null);
-                  setPubchemMeta(null);
-                }}
-                rows={9}
-                spellCheck={false}
-                className="gt-textarea text-xs"
-              />
+              {loadMode === 'paste' ? (
+                <>
+                  <label className="mb-2 mt-4 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink)]/80">
+                    <Atom size={13} /> XYZ / SDF / PDB
+                  </label>
+                  <textarea
+                    value={structure}
+                    onChange={(e) => {
+                      setStructure(e.target.value);
+                      // Hand-editing the box invalidates any PubChem-sourced
+                      // preview/attribution — it's no longer the fetched structure.
+                      setPreview(null);
+                      setPubchemMeta(null);
+                    }}
+                    rows={9}
+                    spellCheck={false}
+                    className="gt-textarea text-xs"
+                  />
+                </>
+              ) : (
+                <div className="mt-4">
+                  <label className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink)]/80">
+                    <Search size={13} /> Compound name or CID
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      value={pubchemQuery}
+                      onChange={(e) => setPubchemQuery(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && runPubchem()}
+                      placeholder="e.g. \u201cferrocene\u201d or 2519"
+                      className="gt-input min-w-0 flex-1 text-sm"
+                      autoFocus
+                    />
+                    <button onClick={runPubchem} disabled={loading} className="gt-btn-ghost px-3 shrink-0">
+                      {loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[11px] text-[var(--gt-ink)]/60">
+                    Pulls the real 3-D structure first &mdash; nothing gets calculated until you say so.
+                  </p>
+                </div>
+              )}
 
               <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                 <label className="gt-tolerance-box">
@@ -387,8 +424,8 @@ export default function GroupTheoryPage() {
                   Calculate point group
                 </button>
               </div>
-              <p className="mt-3 text-[11px] leading-relaxed text-[var(--gt-ink)]/60">
-                Larger tolerance forgives noisier/optimized coordinates but can over-detect symmetry; lower it for a stricter read.
+              <p className="mt-2 text-[10.5px] leading-relaxed text-[var(--gt-ink)]/55">
+                Higher tolerance forgives noisy coordinates, but can over-detect symmetry.
               </p>
 
               {liveStatusLine && (
@@ -407,24 +444,6 @@ export default function GroupTheoryPage() {
                   </span>
                 </div>
               )}
-            </div>
-          </div>
-
-          <div className="gt-card p-4 sm:p-5">
-            <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink-soft)]">
-              Fetch from PubChem
-            </label>
-            <div className="flex gap-2">
-              <input
-                value={pubchemQuery}
-                onChange={(e) => setPubchemQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && runPubchem()}
-                placeholder="Name or CID, e.g. \u201cferrocene\u201d"
-                className="gt-input min-w-0 flex-1 text-sm"
-              />
-              <button onClick={runPubchem} disabled={loading} className="gt-btn-ghost px-3">
-                <Search size={14} />
-              </button>
             </div>
           </div>
 

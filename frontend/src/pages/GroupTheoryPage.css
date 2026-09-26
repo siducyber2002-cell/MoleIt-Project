@@ -197,6 +197,49 @@ body.gt-light-scroll {
   border: 1.5px solid var(--gt-line);
 }
 
+/* ---------- fun little "how it works" step strip (hero) ---------- */
+.gt-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45em;
+}
+.gt-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gt-ink);
+  border: 1.5px solid var(--gt-line);
+  border-radius: 999px;
+  padding: 0.35em 0.8em 0.35em 0.6em;
+  background: #fffdf8;
+}
+.gt-step-emoji { font-size: 14px; line-height: 1; }
+.gt-step-arrow { color: var(--gt-ink-soft); font-size: 14px; }
+
+/* ---------- segmented tab control (Paste / PubChem) ---------- */
+.gt-tab-group {
+  display: inline-flex;
+  gap: 0.2em;
+  border: 2px solid var(--gt-line);
+  border-radius: 999px;
+  padding: 3px;
+  background: var(--gt-paper-soft);
+}
+.gt-tab {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 11.5px;
+  border-radius: 999px;
+  padding: 0.35em 0.9em;
+  color: var(--gt-ink-soft);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.gt-tab:hover { color: var(--gt-ink); }
+.gt-tab.is-active { background: var(--gt-ink); color: var(--gt-paper); }
+
 /* ---------- form controls ---------- */
 .gt-input,
 .gt-textarea {
@@ -396,4 +439,5 @@ html.gt-light-scroll .moleit-logo--dark .moleit-logo-shimmer {
   .gt-input { min-height: 44px; }
   .gt-op-btn { min-height: 34px; padding: 6px 10px; font-size: 12px; }
   .gt-tolerance-box { min-height: 44px; width: 100%; justify-content: space-between; }
+  .gt-tab { min-height: 32px; padding: 6px 12px; font-size: 12px; }
 }
