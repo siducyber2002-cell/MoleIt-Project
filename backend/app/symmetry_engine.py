@@ -681,9 +681,30 @@ def _order_of_rotation(M):
     th = math.acos(c)
     if th < 1e-6:
         return 1
-    raw = 2 * math.pi / th
-    n = max(2, round(raw))
-    return n if abs(raw - n) < 1e-3 else None
+    if d < 0:
+        raw = 2 * math.pi / th
+        n = max(2, round(raw))
+        return n if abs(raw - n) < 1e-3 else None
+    # For a proper rotation, the true group-theoretic order is the
+    # smallest q such that q*theta is a whole multiple of 360 degrees —
+    # NOT just whether theta itself equals 360/q for some integer q. That
+    # narrower check only recognizes a rotation's "primitive" power
+    # (k=1, and by folding k=n-1) and silently misses every other
+    # non-trivial power such as C5^2/C5^3 (theta=144/216 degrees, neither
+    # of which is 360/n for a whole n) even though both are genuine
+    # order-5 elements. Confirmed impact: this made c5-type element
+    # counts for the icosahedral point groups undercount by half — I/Ih
+    # detection still worked here only because its threshold happened to
+    # be low enough to pass anyway on the undercounted total, not because
+    # the count was actually right. Any Cn/Dn-family group with n=5 (the
+    # first n where non-edge powers don't coincidentally fold back onto
+    # the primitive angle) was silently affected the same way.
+    frac = th / (2 * math.pi)
+    for q in range(2, 25):
+        p = frac * q
+        if abs(p - round(p)) < 1e-3 and round(p) >= 1:
+            return q
+    return None
 
 def _rotation_axis(M):
     x, y, z = M[2][1] - M[1][2], M[0][2] - M[2][0], M[1][0] - M[0][1]
@@ -1407,6 +1428,46 @@ POINT_GROUP_INFO = {
 }
 
 
+def _tolerance_scan(atoms, base_tol, base_group):
+    """A few extra tolerance passes around the one actually used, answering two
+    related, high-value questions cheaply:
+      - stability: does the SAME point group hold up under small tolerance
+        changes, or is the classification sitting right on a knife's edge —
+        a real sign the geometry is noisy/borderline rather than a clean read?
+      - closest higher symmetry: would a modestly looser tolerance reveal a
+        higher-symmetry idealized structure this one is close to? Exactly the
+        situation with a real (e.g. PubChem-optimized) geometry that's a
+        slightly-distorted version of some textbook-symmetric shape.
+    Bounded to modest atom counts and at most 3 extra detect_operations calls,
+    so it stays cheap even though each call itself isn't free.
+    """
+    n_atoms = len(atoms)
+    if n_atoms > 50 or base_tol <= 0:
+        return {"stable": None, "closestHigherSymmetry": None}
+    base_order = expected_order(base_group)
+    if isinstance(base_order, str):  # linear molecules use a separate analytic path
+        return {"stable": None, "closestHigherSymmetry": None}
+
+    tighter = detect_operations(atoms, max(0.001, base_tol * 0.5))
+    looser2 = detect_operations(atoms, min(0.6, base_tol * 2))
+    stable = (tighter["group"] == base_group) and (looser2["group"] == base_group)
+
+    closest = None
+    for r, mult in ((looser2, 2), (None, 4)):
+        t = min(0.6, base_tol * mult)
+        if r is None:
+            r = detect_operations(atoms, t)
+        order = expected_order(r["group"])
+        if not isinstance(order, str) and r["group"] != base_group and order > base_order:
+            closest = {
+                "group": r["group"],
+                "groupPretty": pretty(r["group"]),
+                "toleranceNeeded": round(t, 4),
+                "maxErrorAtThatTolerance": round(r.get("maxError", 0), 4),
+            }
+            break
+    return {"stable": stable, "closestHigherSymmetry": closest}
+
 def analyze(text, tol=TOL_DEFAULT):
     tol = max(0.001, min(1, tol or TOL_DEFAULT))
     parsed = parse_structure(text)
@@ -1420,6 +1481,7 @@ def analyze(text, tol=TOL_DEFAULT):
     lin = linear_symmetry(parsed["atoms"], result, tol) if (result["linear"] and len(parsed["atoms"]) >= 2) else None
     deriv = {"ops": lin["ops"], "T": None, "analysis": None} if lin else derive_representation(parsed["atoms"], result)
     center = _center(parsed["atoms"])
+    tol_scan = _tolerance_scan(parsed["atoms"], tol, result["group"])
 
     response = {
         "group": result["group"],
@@ -1455,6 +1517,13 @@ def analyze(text, tol=TOL_DEFAULT):
             else None
         ),
         "groupDescription": POINT_GROUP_INFO.get(result["group"]),
+        # Tolerance-scan diagnostics: is this classification stable under
+        # small tolerance changes, and — separately — is there a
+        # higher-symmetry idealized point group this geometry is a close,
+        # slightly-distorted version of? Both None for linear molecules and
+        # for larger structures where the extra passes aren't worth the cost.
+        "toleranceStable": tol_scan["stable"],
+        "closestHigherSymmetry": tol_scan["closestHigherSymmetry"],
         "atomCount": len(parsed["atoms"]),
         "bondCount": len(parsed["bonds"]),
         "atoms": [{"el": a["el"], "x": a["p"][0], "y": a["p"][1], "z": a["p"][2]} for a in parsed["atoms"]],
