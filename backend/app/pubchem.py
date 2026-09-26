@@ -27,7 +27,11 @@ import requests
 
 PUG_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 PUG_VIEW_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug_view"
-TIMEOUT = 12
+# (connect_timeout, read_timeout). See routers/symmetry.py for why this is
+# split rather than one flat number — a dead/blocked network path fails on
+# the connect phase, and a short connect timeout catches that fast instead
+# of waiting the full read timeout to find out.
+TIMEOUT = (4, 9)
 # PUG View's physical-properties record is the slowest single endpoint we
 # call (it returns the whole compound "document" as a nested Section tree,
 # which we then walk) and, per _fetch_physical_properties below, is
@@ -62,21 +66,18 @@ class PubChemServiceError(Exception):
     """PubChem reached but returned something we couldn't use."""
 
 
-# BUG FIX: every PubChem call used to be a single-shot GET with no retry at
-# all. PubChem's own PUG REST documentation is explicit that a busy server
-# answers with HTTP 503 and a body like
-# {"Fault": {"Code": "PUGREST.ServerBusy", ...}} and that clients are
-# expected to back off and retry rather than treat that as a hard failure.
-# Previously that transient (and common, e.g. right after a cold start when
-# several requests land close together) 503 immediately surfaced to the user
-# as "could not fetch that compound" even though the very next attempt,
-# moments later, would usually succeed. Same idea for a dropped connection
-# (requests.RequestException) - one flaky handshake shouldn't fail the whole
-# lookup. This retries a handful of times with a short exponential backoff
-# before giving up for real.
+# BUG FIX (regression from an earlier fix): retrying is only worth doing
+# for a transient blip. This used to retry 3x with growing backoff — fine
+# on its own, but every one of the several sequential PubChem calls a
+# single request makes (name lookup, then autocomplete, then name lookup
+# again, etc.) each independently retried 3x, so a genuinely unreachable
+# PubChem multiplied into minutes of waiting before finally failing. Now
+# just one retry (2 attempts total) with a short fixed backoff — enough to
+# survive a real one-off blip or a 503 "ServerBusy", without turning a hard
+# network failure into a multi-minute hang.
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-_MAX_ATTEMPTS = 3
-_RETRY_BACKOFF_BASE = 0.6  # seconds; doubles each attempt (0.6s, 1.2s)
+_MAX_ATTEMPTS = 2
+_RETRY_BACKOFF = 0.4  # seconds
 
 
 def _get(url, **kwargs):
@@ -88,13 +89,13 @@ def _get(url, **kwargs):
         except requests.RequestException as exc:
             last_exc = exc
             if attempt < _MAX_ATTEMPTS - 1:
-                time.sleep(_RETRY_BACKOFF_BASE * (2 ** attempt))
+                time.sleep(_RETRY_BACKOFF)
                 continue
             raise
         if resp.status_code == 404:
             raise PubChemNotFoundError()
         if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_ATTEMPTS - 1:
-            time.sleep(_RETRY_BACKOFF_BASE * (2 ** attempt))
+            time.sleep(_RETRY_BACKOFF)
             continue
         resp.raise_for_status()
         return resp

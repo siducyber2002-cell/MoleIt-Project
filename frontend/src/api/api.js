@@ -2,13 +2,16 @@ import axios from 'axios';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-// BUG FIX: this was 45s. A cold Render free-tier backend can take longer
-// than that just to wake up and answer its very first request, and
-// PubChem's own lookups (name resolution + SDF fetch, now with retries —
-// see pubchem.py / routers/symmetry.py) can occasionally run past 45s too.
-// A request that was actually still in flight was being aborted client-side
-// and shown to the user as a hard failure. Bumped to a more forgiving 75s.
-const api = axios.create({ baseURL: API_BASE, timeout: 75000 });
+// BUG FIX (regression from an earlier fix): this was bumped to 75s and
+// paired with a client-side retry (see withRetry below) on the theory that
+// PubChem lookups might occasionally run long. That was wrong — the
+// backend's own PubChem calls now retry internally too (routers/symmetry.py
+// / pubchem.py), and stacking a client-side retry on top of a
+// server-side retry on top of PubChem's own retry-worthy 503s multiplied
+// into multi-minute hangs when PubChem was genuinely unreachable rather
+// than just slow. 45s is enough for a real, reachable, slow response
+// without silently sitting through several minutes of doomed retries.
+const api = axios.create({ baseURL: API_BASE, timeout: 45000 });
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('molapp_token');
@@ -32,35 +35,6 @@ api.interceptors.response.use(
 
 const pick = (key) => (r) => r.data[key];
 
-// BUG FIX: none of the API calls in this file ever retried anything —
-// a single transient timeout, a dropped connection, or PubChem answering
-// with a temporary 502/503/504 immediately surfaced as a hard failure
-// ("Could not fetch that compound from PubChem."), even though trying
-// again a moment later usually succeeds (the backend itself now retries
-// PubChem internally too — see pubchem.py / routers/symmetry.py — but
-// that can't help if the *browser's own* request to our backend is what
-// timed out or dropped). This wraps a request in one silent retry for
-// exactly the failure modes that are worth retrying; a real 4xx (bad
-// input, not found) is never retried since trying again won't change it.
-async function withRetry(fn, { retries = 1, delayMs = 1200 } = {}) {
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      const status = err?.response?.status;
-      const isTimeout = err?.code === 'ECONNABORTED';
-      const isNetworkError = err?.isAxiosError && !err.response;
-      const isRetryableStatus = status === 502 || status === 503 || status === 504;
-      const shouldRetry = attempt < retries && (isTimeout || isNetworkError || isRetryableStatus);
-      if (!shouldRetry) throw lastErr;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-  throw lastErr;
-}
-
 // ---- Auth ----
 export const registerUser = (data) => api.post('/api/auth/register', data).then((r) => r.data);
 export const loginUser = (data) => api.post('/api/auth/login', data).then((r) => r.data);
@@ -73,7 +47,7 @@ export const fetchCompounds = (params) => api.get('/api/compounds', { params }).
 export const fetchCompoundCategories = () => api.get('/api/compounds/categories').then(pick('categories'));
 export const fetchCompound = (id) => api.get(`/api/compounds/${id}`).then(pick('compound'));
 export const fetchExternalCompound = (query) =>
-  withRetry(() => api.post('/api/compounds/fetch', { query }).then(pick('compound')));
+  api.post('/api/compounds/fetch', { query }).then(pick('compound'));
 export const matchCompoundsByFormula = (formula) =>
   api.get('/api/compounds/match/by-formula', { params: { formula } }).then(pick('matches'));
 export const resolveCompoundMatch = (payload) =>
@@ -273,8 +247,8 @@ export const submitQuizAttempt = (data) => api.post('/api/quiz/attempts', data).
 // ---- Group Theory / Symmetry ----
 export const fetchSymmetryDemos = () => api.get('/api/symmetry/demos').then(pick('demos'));
 export const analyzeSymmetry = (structure, tolerance) =>
-  withRetry(() => api.post('/api/symmetry/analyze', { structure, tolerance }).then(pick('result')));
+  api.post('/api/symmetry/analyze', { structure, tolerance }).then(pick('result'));
 export const analyzeSymmetryFromPubchem = (query, tolerance) =>
-  withRetry(() => api.post('/api/symmetry/pubchem', { query, tolerance }).then(pick('result')));
+  api.post('/api/symmetry/pubchem', { query, tolerance }).then(pick('result'));
 
 export default api;

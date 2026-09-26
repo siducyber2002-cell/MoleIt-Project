@@ -28,7 +28,14 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/symmetry", tags=["symmetry"])
 
 PUG_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
-PUBCHEM_TIMEOUT = 12
+# (connect_timeout, read_timeout) instead of one flat number. If PubChem is
+# genuinely unreachable (blocked egress, dead route, DNS issue) the TCP
+# handshake itself never completes — a flat 12s "timeout" actually meant
+# waiting the full 12s per attempt just to learn that, and with retries
+# stacked on top of retries (see below) that turned into minutes. A short
+# connect timeout fails that case fast; the read timeout stays generous for
+# a slow-but-reachable PubChem.
+PUBCHEM_TIMEOUT = (4, 9)
 
 # Shared, connection-pooling Session (mirrors pubchem.py) instead of bare
 # requests.get() — every call here hits the same PubChem host, so reusing
@@ -36,23 +43,30 @@ PUBCHEM_TIMEOUT = 12
 _session = requests.Session()
 _session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20))
 
-# BUG FIX: this router used to fire a single bare `_session.get(...)` for
-# every PubChem call, with no retry at all — so PubChem's well-documented
-# transient "PUGREST.ServerBusy" 503 (or a one-off dropped connection) took
-# down the whole lookup on the spot, even though trying again a moment
-# later would normally succeed. This mirrors the same retry-with-backoff
-# fix applied in pubchem.py.
+# BUG FIX (regression from an earlier fix): this router now retries
+# transient failures (a dropped connection, PubChem's 503 "ServerBusy")
+# instead of dying on the first one — but the previous version retried
+# 3x *at this layer*, and _resolve_cid() below calls this layer up to
+# three separate times (exact lookup, autocomplete, exact lookup again),
+# each of which could ALSO retry 3x — so a genuinely unreachable PubChem
+# multiplied out to 9+ full-timeout waits before finally failing, which is
+# exactly the multi-minute hang just reported. Fixed two ways: (1) only one
+# retry here (2 attempts total, not 3), and (2) _resolve_cid now stops
+# immediately the first time it learns PubChem is flat-out unreachable,
+# instead of ploughing through the rest of its fallback chain on a network
+# path that already just failed.
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-_MAX_ATTEMPTS = 3
-_RETRY_BACKOFF_BASE = 0.6  # seconds; doubles each attempt
+_MAX_ATTEMPTS = 2
+_RETRY_BACKOFF_BASE = 0.4  # seconds
 
 
 def _get_with_retry(url, **kwargs):
     """Shared GET helper for this router: retries transient failures
-    (dropped connections, 429/5xx) with backoff before giving up. Raises
-    UpstreamUnavailableError if PubChem could never be reached at all, or
-    returns the final `requests.Response` (which may still be a real 4xx —
-    the caller decides what a non-2xx *reachable* response means)."""
+    (dropped connections, 429/5xx) once, with a short backoff, before
+    giving up. Raises UpstreamUnavailableError if PubChem could never be
+    reached at all, or returns the final `requests.Response` (which may
+    still be a real 4xx — the caller decides what a non-2xx *reachable*
+    response means)."""
     kwargs.setdefault("timeout", PUBCHEM_TIMEOUT)
     last_exc = None
     for attempt in range(_MAX_ATTEMPTS):
@@ -61,14 +75,18 @@ def _get_with_retry(url, **kwargs):
         except requests.RequestException as exc:
             last_exc = exc
             if attempt < _MAX_ATTEMPTS - 1:
-                time.sleep(_RETRY_BACKOFF_BASE * (2 ** attempt))
+                time.sleep(_RETRY_BACKOFF_BASE)
                 continue
-            raise UpstreamUnavailableError("Could not reach PubChem.")
+            raise UpstreamUnavailableError(
+                "Could not reach PubChem (connection failed or timed out repeatedly). "
+                "This is a network-reachability problem, not a bad compound name."
+            )
         if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_ATTEMPTS - 1:
-            time.sleep(_RETRY_BACKOFF_BASE * (2 ** attempt))
+            time.sleep(_RETRY_BACKOFF_BASE)
             continue
         return resp
     raise UpstreamUnavailableError("Could not reach PubChem.") if last_exc else None
+
 
 
 class AnalyzeRequest(BaseModel):
@@ -175,36 +193,35 @@ def _resolve_cid(name: str) -> str:
     (pubchem.py's find_cid) — this tab was missing that fallback entirely,
     so anything not spelled exactly as PubChem's canonical name failed.
 
-    BUG FIX: this used to let an UpstreamServiceError/UpstreamUnavailableError
-    raised by the *exact* lookup propagate straight out of this function,
-    which meant a single transient PubChem hiccup on the very first call
-    skipped the autocomplete fallback entirely and failed the whole
-    request — even though the fallback path existed and would often have
-    resolved it fine. Now a transient upstream failure on the exact lookup
-    is treated the same as "not found": we still try autocomplete before
-    giving up for real.
+    BUG FIX: previously, the moment PubChem was confirmed *unreachable*
+    (not "compound not found" — actually unreachable), this kept going and
+    tried the autocomplete endpoint and a second exact lookup anyway, on
+    the exact same dead network path, multiplying one timeout into three.
+    Now an UpstreamUnavailableError is treated as final immediately — no
+    point retrying a fallback over a connection that just failed — while a
+    genuine "not found" (a clean 404, PubChem was reachable) still falls
+    through to autocomplete as before.
     """
-    cid = None
     try:
         cid = _lookup_cid_exact(name)
-    except (UpstreamServiceError, UpstreamUnavailableError):
-        logger.warning("Exact PubChem name lookup failed transiently for %r; trying autocomplete", name)
+    except UpstreamServiceError:
+        cid = None  # PubChem answered but with something unusable; still try autocomplete
+    # An UpstreamUnavailableError (network truly down) is intentionally not
+    # caught here — it propagates straight out and skips the rest of this
+    # function, since retrying on the same dead path can't help.
     if cid:
         return cid
 
-    try:
-        resp = _get_with_retry(
-            f"https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/{quote(name)}/json",
-            params={"limit": 1},
-        )
-    except UpstreamUnavailableError:
-        raise UpstreamUnavailableError("Could not reach PubChem.")
+    resp = _get_with_retry(
+        f"https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/{quote(name)}/json",
+        params={"limit": 1},
+    )
     if resp.ok:
         candidates = resp.json().get("dictionary_terms", {}).get("compound", [])
         if candidates:
             try:
                 cid = _lookup_cid_exact(candidates[0])
-            except (UpstreamServiceError, UpstreamUnavailableError):
+            except UpstreamServiceError:
                 cid = None
             if cid:
                 return cid
