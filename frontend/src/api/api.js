@@ -250,5 +250,11 @@ export const analyzeSymmetry = (structure, tolerance) =>
   api.post('/api/symmetry/analyze', { structure, tolerance }).then(pick('result'));
 export const analyzeSymmetryFromPubchem = (query, tolerance) =>
   api.post('/api/symmetry/pubchem', { query, tolerance }).then(pick('result'));
+// Structure-only PubChem lookup: resolves the compound and returns its 3-D
+// atoms/bonds for immediate display, without running the symmetry engine.
+// Pair with analyzeSymmetry(preview.sourceStructure, tolerance) once the
+// user actually asks to calculate the point group.
+export const fetchPubchemStructure = (query) =>
+  api.post('/api/symmetry/pubchem/structure', { query }).then(pick('preview'));
 
 export default api;

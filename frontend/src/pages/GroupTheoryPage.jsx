@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import SymmetryElementsViewer, { KIND_META } from '../components/Viewer3D/SymmetryElementsViewer';
 import { Reveal, StaggerGroup, Word, InlineReveal } from '../components/motion/ScrollReveal';
-import { fetchSymmetryDemos, analyzeSymmetry, analyzeSymmetryFromPubchem, extractErrorMessage } from '../api/api';
+import { fetchSymmetryDemos, analyzeSymmetry, fetchPubchemStructure, extractErrorMessage } from '../api/api';
 import { symmetryAtomsToMolBlock } from '../lib/symmetryMolblock';
 import './GroupTheoryPage.css';
 
@@ -143,6 +143,12 @@ export default function GroupTheoryPage() {
   const [error, setError] = useState(null);
   const [result, setResult] = useState(saved?.result || null);
   const [pubchemMeta, setPubchemMeta] = useState(saved?.pubchemMeta || null);
+  // A structure that has been fetched (from PubChem) and can already be
+  // shown in 3-D, but hasn't been run through the symmetry engine yet —
+  // that only happens once the user clicks "Calculate point group". Kept
+  // separate from `result` so the "point group not calculated yet" view
+  // and the full report never get confused with each other.
+  const [preview, setPreview] = useState(null);
   const [showDerivation, setShowDerivation] = useState(false);
   const [hoveredOp, setHoveredOp] = useState(null);
   const [pinnedOp, setPinnedOp] = useState(null);
@@ -180,13 +186,19 @@ export default function GroupTheoryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result]);
 
+  // Runs the actual symmetry engine on whatever structure text is
+  // currently loaded (pasted by hand, a demo, or a structure already
+  // fetched from PubChem via runPubchem below). This is the one call that
+  // does the heavy lifting, so it only ever fires when the user explicitly
+  // asks for it — either by clicking "Calculate point group" directly, or
+  // by clicking it from the preview card after a PubChem search.
   const runAnalyze = async (text = structure) => {
     setLoading(true);
     setError(null);
-    setPubchemMeta(null);
     try {
       const r = await analyzeSymmetry(text, tolerance);
       setResult(r);
+      setPreview(null); // superseded by the full result now
     } catch (err) {
       setError(extractErrorMessage(err, "Couldn't analyze that structure."));
       setResult(null);
@@ -195,18 +207,27 @@ export default function GroupTheoryPage() {
     }
   };
 
+  // Search step only: resolves the compound and loads its real 3-D
+  // structure into the viewer immediately. Deliberately does NOT run the
+  // symmetry engine — that used to happen automatically on every search
+  // and was the source of the long delay, since point-group detection
+  // scales with atom count/symmetry richness. The engine now only runs
+  // when the user clicks "Calculate point group" afterwards.
   const runPubchem = async () => {
     if (!pubchemQuery.trim()) return;
     setLoading(true);
     setError(null);
+    setResult(null);
+    setPreview(null);
+    setPubchemMeta(null);
     try {
-      const r = await analyzeSymmetryFromPubchem(pubchemQuery.trim(), tolerance);
-      setResult(r);
-      setStructure(r.sourceStructure || structure);
-      setPubchemMeta({ cid: r.pubchemCid, url: r.pubchemUrl });
+      const p = await fetchPubchemStructure(pubchemQuery.trim());
+      setStructure(p.sourceStructure || structure);
+      setPreview(p);
+      setPubchemMeta({ cid: p.pubchemCid, url: p.pubchemUrl });
     } catch (err) {
       setError(extractErrorMessage(err, 'Could not fetch that compound from PubChem.'));
-      setResult(null);
+      setPreview(null);
     } finally {
       setLoading(false);
     }
@@ -216,13 +237,16 @@ export default function GroupTheoryPage() {
     setStructure(demo.xyz);
     setPubchemQuery('');
     setPubchemMeta(null);
+    setPreview(null);
     runAnalyze(demo.xyz);
   };
 
   const molBlock = useMemo(() => {
-    if (!result?.atoms?.length) return null;
-    return symmetryAtomsToMolBlock(result.atoms, result.bonds || [], result.formulaPretty || 'Structure');
-  }, [result]);
+    const atoms = result?.atoms || preview?.atoms;
+    const bonds = result?.bonds || preview?.bonds;
+    if (!atoms?.length) return null;
+    return symmetryAtomsToMolBlock(atoms, bonds || [], result?.formulaPretty || preview?.formulaPretty || 'Structure');
+  }, [result, preview]);
 
   const opGroups = useMemo(() => {
     if (!result?.operations) return [];
@@ -250,9 +274,11 @@ export default function GroupTheoryPage() {
     };
   }, []);
 
-  const bondCount = result?.bonds?.length ?? 0;
+  const bondCount = result?.bonds?.length ?? preview?.bonds?.length ?? 0;
   const liveStatusLine = pubchemMeta
-    ? `PubChem CID ${pubchemMeta.cid} \u00b7 3-D structure loaded into the simulator \u00b7 point group ${result?.groupPretty} \u00b7 ${result?.atomCount} atoms \u00b7 ${bondCount} bonds`
+    ? result
+      ? `PubChem CID ${pubchemMeta.cid} \u00b7 3-D structure loaded into the simulator \u00b7 point group ${result.groupPretty} \u00b7 ${result.atomCount} atoms \u00b7 ${bondCount} bonds`
+      : `PubChem CID ${pubchemMeta.cid} \u00b7 3-D structure loaded into the simulator \u00b7 ${preview?.atomCount ?? '?'} atoms \u00b7 ${bondCount} bonds \u00b7 point group not calculated yet`
     : result
     ? `3-D structure loaded into the simulator \u00b7 point group ${result.groupPretty} \u00b7 ${result.atomCount} atoms \u00b7 ${bondCount} bonds`
     : null;
@@ -331,7 +357,13 @@ export default function GroupTheoryPage() {
               </label>
               <textarea
                 value={structure}
-                onChange={(e) => setStructure(e.target.value)}
+                onChange={(e) => {
+                  setStructure(e.target.value);
+                  // Hand-editing the box invalidates any PubChem-sourced
+                  // preview/attribution — it's no longer the fetched structure.
+                  setPreview(null);
+                  setPubchemMeta(null);
+                }}
                 rows={9}
                 spellCheck={false}
                 className="gt-textarea text-xs"
@@ -423,11 +455,62 @@ export default function GroupTheoryPage() {
         <div className="space-y-5">
           <span className="gt-kicker text-[var(--gt-ink-soft)]"><span className="gt-kicker-num">03</span> Results</span>
 
-          {!result && !loading && (
+          {!result && !preview && !loading && (
             <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-[18px] border-2 border-dashed border-[var(--gt-ink)]/30 bg-[var(--gt-paper-soft)] p-8 text-center">
               <Orbit size={28} className="mb-2 text-[var(--gt-ink-soft)]" />
               <p className="text-sm text-[var(--gt-ink-soft)]">Paste a structure, pick a demo, or fetch one from PubChem to get started.</p>
             </div>
+          )}
+
+          {!result && preview && (
+            <>
+              <Reveal className="gt-card p-4 sm:p-5">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <div className="gt-heading text-xl text-[var(--gt-ink)] sm:text-2xl">{preview.formulaPretty}</div>
+                    <p className="mt-1 text-xs text-[var(--gt-ink-soft)]">
+                      3-D structure loaded &middot; {preview.atomCount} atoms &middot; {preview.bondCount} bonds
+                    </p>
+                    <p className="mt-2 max-w-xl text-[12px] leading-relaxed text-[var(--gt-ink)]/80">
+                      Point group not calculated yet. Rotate and inspect the structure below, then hit
+                      &ldquo;Calculate point group&rdquo; when you&rsquo;re ready to run the symmetry engine.
+                    </p>
+                  </div>
+                  <button onClick={() => runAnalyze()} disabled={loading} className="gt-btn w-full justify-center sm:w-auto">
+                    {loading ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                    Calculate point group
+                  </button>
+                </div>
+
+                {preview.structureWarning && (
+                  <div className="mt-3 flex items-start gap-2 rounded-lg border-2 border-[var(--gt-orange)]/50 p-2.5 text-[11px]" style={{ background: '#fdf1de' }}>
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0 text-[var(--gt-orange)]" />
+                    <span className="text-[#6b4a13]">{preview.structureWarning}</span>
+                  </div>
+                )}
+              </Reveal>
+
+              {molBlock && (
+                <Reveal delay={0.03} className="gt-card-flat gt-viewer-card overflow-hidden">
+                  <div className="flex items-center gap-1.5 border-b-2 border-[var(--gt-ink)] px-4 py-2.5">
+                    <Axis3d size={13} className="text-[var(--gt-teal)]" />
+                    <span className="text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink-soft)]">
+                      Live 3-D structure &mdash; symmetry not run yet
+                    </span>
+                  </div>
+                  <div className="p-1.5">
+                    <SymmetryElementsViewer
+                      molBlock={molBlock}
+                      atoms={preview.atoms}
+                      operations={[]}
+                      groupPretty={null}
+                      formulaPretty={preview.formulaPretty}
+                      height={480}
+                    />
+                  </div>
+                </Reveal>
+              )}
+            </>
           )}
 
           {result && (

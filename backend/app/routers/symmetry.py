@@ -154,6 +154,75 @@ def analyze_structure(payload: AnalyzeRequest):
         return err(500, "Internal server error")
 
 
+@router.post("/pubchem/structure")
+def fetch_pubchem_structure(payload: PubchemRequest):
+    """Resolves a compound name or CID and pulls its 3-D SDF conformer,
+    exactly like /pubchem below -- but stops there. It does NOT run
+    detect_operations()/analyze(), only the cheap parse_structure() pass,
+    so the browser can show the real 3-D structure the moment a search
+    resolves without also paying for a full symmetry-operation search
+    (which scales with atom count/symmetry richness and can be genuinely
+    slow) before the user has even asked for a point group. The frontend
+    calls this on search, then calls /analyze separately -- with this same
+    sourceStructure text -- only when the user clicks "Calculate point
+    group".
+    """
+    query = payload.query.strip()
+    logger.info("Symmetry PubChem structure-only fetch requested | query=%r", query)
+    try:
+        if not query:
+            raise BadRequestError("Enter a PubChem compound name or CID.")
+        cid_hint = query if query.isdigit() else None
+        cid, sdf, quality = run_with_deadline(
+            _resolve_and_fetch, query, cid_hint, timeout=_PUBCHEM_DEADLINE_SECONDS
+        )
+        parsed = engine.parse_structure(sdf)
+        formula = {}
+        for a in parsed["atoms"]:
+            formula[a["el"]] = formula.get(a["el"], 0) + 1
+        preview = {
+            "pubchemCid": cid,
+            "pubchemUrl": f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}",
+            "sourceStructure": sdf,
+            "structureQuality": quality,
+            "atomCount": len(parsed["atoms"]),
+            "bondCount": len(parsed["bonds"]),
+            "formulaPretty": engine.pretty_formula(formula),
+            "atoms": [{"el": a["el"], "x": a["p"][0], "y": a["p"][1], "z": a["p"][2]} for a in parsed["atoms"]],
+            "bonds": [[b[0], b[1]] for b in parsed["bonds"]],
+        }
+        if quality == "2d-fallback":
+            preview["structureWarning"] = (
+                "PubChem has no 3-D conformer on file for this compound — this is its "
+                "flattened 2-D depiction (all atoms at z=0). Calculating the point group "
+                "from this will over-report symmetry. Paste a real 3-D structure "
+                "(XYZ/SDF/PDB) for a trustworthy result."
+            )
+        logger.info(
+            "Symmetry PubChem structure-only fetch succeeded | cid=%s quality=%s atoms=%d",
+            cid, quality, preview["atomCount"],
+        )
+        return ok(200, "Structure fetched successfully", preview=preview)
+    except BadRequestError as e:
+        logger.warning("Symmetry PubChem structure-only fetch failed | reason=%s", e)
+        return err(400, str(e))
+    except UpstreamServiceError as e:
+        logger.warning("Symmetry PubChem structure-only upstream error | reason=%s", e)
+        return err(502, str(e))
+    except UpstreamUnavailableError as e:
+        logger.warning("Symmetry PubChem structure-only unavailable | reason=%s", e)
+        return err(503, str(e))
+    except DeadlineExceeded as e:
+        logger.warning("Symmetry PubChem structure-only timed out (deadline exceeded) | reason=%s", e)
+        return err(503, "PubChem took too long to respond (likely a network stall). Please try again.")
+    except engine.SymmetryError as e:
+        logger.warning("Symmetry PubChem structure-only parse failed | reason=%s", e)
+        return err(400, str(e))
+    except Exception:
+        logger.error("Symmetry PubChem structure-only fetch crashed", exc_info=True)
+        return err(500, "Internal server error")
+
+
 @router.post("/pubchem")
 def analyze_from_pubchem(payload: PubchemRequest):
     """Resolves a compound name or CID against PubChem, pulls its 3-D SDF
