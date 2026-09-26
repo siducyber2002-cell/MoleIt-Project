@@ -29,12 +29,27 @@ Two independent fixes, applied together:
    the request forever — the underlying thread is abandoned (Python has
    no safe way to kill a thread mid-syscall) but the user gets a fast,
    honest answer instead of a spinner that never resolves.
+
+DIAGNOSTIC LOGGING: the first deploy of this fix still hung with zero log
+output at all -- not even the DeadlineExceeded warning, which should be
+physically guaranteed to print within run_with_deadline's timeout no
+matter what the wrapped call does. That's only possible if either (a)
+this module never actually got imported/applied in the running process,
+or (b) the hang is happening somewhere upstream of run_with_deadline
+altogether. Every step below now logs immediately, so the next attempt
+will show us exactly which of those it is instead of us guessing again.
 """
 import socket
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeoutError
 
 import urllib3.util.connection as _urllib3_conn
+
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _original_allowed_gai_family = _urllib3_conn.allowed_gai_family
 
@@ -47,6 +62,11 @@ def _ipv4_only_gai_family():
 # this module before making any request, so this runs once per process
 # and covers every PubChem call in the app, including any added later.
 _urllib3_conn.allowed_gai_family = _ipv4_only_gai_family
+logger.info(
+    "net.py loaded | IPv4-only DNS patch applied (was %s, now %s)",
+    getattr(_original_allowed_gai_family, "__name__", _original_allowed_gai_family),
+    _ipv4_only_gai_family.__name__,
+)
 
 
 class DeadlineExceeded(Exception):
@@ -70,12 +90,35 @@ def run_with_deadline(fn, *args, timeout: float, **kwargs):
     result, or re-raises whatever exception fn raised, unchanged. If fn
     hasn't finished within `timeout` seconds, raises DeadlineExceeded and
     abandons the underlying thread rather than waiting on it further."""
+    fn_name = getattr(fn, "__name__", str(fn))
+    started = time.monotonic()
+    logger.info(
+        "run_with_deadline: submitting %s to deadline pool (cap=%.0fs) | thread=%s",
+        fn_name, timeout, threading.current_thread().name,
+    )
     future = _deadline_pool.submit(fn, *args, **kwargs)
     try:
-        return future.result(timeout=timeout)
+        result = future.result(timeout=timeout)
+        logger.info(
+            "run_with_deadline: %s returned after %.2fs",
+            fn_name, time.monotonic() - started,
+        )
+        return result
     except _FutureTimeoutError:
+        elapsed = time.monotonic() - started
+        logger.warning(
+            "run_with_deadline: %s did NOT return within %.0fs (elapsed %.2fs) -- "
+            "abandoning that thread, returning DeadlineExceeded to caller",
+            fn_name, timeout, elapsed,
+        )
         raise DeadlineExceeded(
-            f"Timed out after {timeout:.0f}s waiting on {getattr(fn, '__name__', fn)!r} "
+            f"Timed out after {timeout:.0f}s waiting on {fn_name!r} "
             "-- this looks like a DNS/network stall rather than PubChem itself "
             "returning an error."
         )
+    except Exception as exc:
+        logger.info(
+            "run_with_deadline: %s raised %s after %.2fs (propagating)",
+            fn_name, type(exc).__name__, time.monotonic() - started,
+        )
+        raise

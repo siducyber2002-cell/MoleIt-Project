@@ -11,6 +11,7 @@ PubChem directly (no CORS, and it keeps the tolerance/engine logic
 server-side rather than duplicated in the client).
 """
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
@@ -71,9 +72,15 @@ def _get_with_retry(url, **kwargs):
     kwargs.setdefault("timeout", PUBCHEM_TIMEOUT)
     last_exc = None
     for attempt in range(_MAX_ATTEMPTS):
+        t0 = time.monotonic()
+        logger.info("_get_with_retry: GET %s (attempt %d/%d) starting", url, attempt + 1, _MAX_ATTEMPTS)
         try:
             resp = _session.get(url, **kwargs)
         except requests.RequestException as exc:
+            logger.info(
+                "_get_with_retry: GET %s attempt %d raised %s after %.2fs",
+                url, attempt + 1, type(exc).__name__, time.monotonic() - t0,
+            )
             last_exc = exc
             if attempt < _MAX_ATTEMPTS - 1:
                 time.sleep(_RETRY_BACKOFF_BASE)
@@ -82,6 +89,10 @@ def _get_with_retry(url, **kwargs):
                 "Could not reach PubChem (connection failed or timed out repeatedly). "
                 "This is a network-reachability problem, not a bad compound name."
             )
+        logger.info(
+            "_get_with_retry: GET %s attempt %d got status=%s after %.2fs",
+            url, attempt + 1, resp.status_code, time.monotonic() - t0,
+        )
         if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_ATTEMPTS - 1:
             time.sleep(_RETRY_BACKOFF_BASE)
             continue
@@ -205,8 +216,11 @@ def _resolve_and_fetch(query: str, cid_hint: str | None) -> tuple[str, str, str]
     """Runs entirely inside run_with_deadline's worker thread. Returns
     (cid, sdf, quality). Any BadRequestError / UpstreamServiceError /
     UpstreamUnavailableError raised inside propagates through unchanged."""
+    logger.info("_resolve_and_fetch: starting | query=%r cid_hint=%r thread=%s", query, cid_hint, threading.current_thread().name)
     cid = cid_hint or _resolve_cid(query)
+    logger.info("_resolve_and_fetch: cid resolved to %s, fetching SDF", cid)
     sdf, quality = _fetch_sdf_with_fallback(cid)
+    logger.info("_resolve_and_fetch: sdf fetched | cid=%s quality=%s len=%d", cid, quality, len(sdf))
     return cid, sdf, quality
 
 
@@ -227,6 +241,7 @@ def _resolve_cid(name: str) -> str:
     genuine "not found" (a clean 404, PubChem was reachable) still falls
     through to autocomplete as before.
     """
+    logger.info("_resolve_cid: starting exact lookup for %r", name)
     try:
         cid = _lookup_cid_exact(name)
     except UpstreamServiceError:
@@ -235,8 +250,10 @@ def _resolve_cid(name: str) -> str:
     # caught here — it propagates straight out and skips the rest of this
     # function, since retrying on the same dead path can't help.
     if cid:
+        logger.info("_resolve_cid: exact lookup succeeded | name=%r cid=%s", name, cid)
         return cid
 
+    logger.info("_resolve_cid: exact lookup found nothing, trying autocomplete for %r", name)
     resp = _get_with_retry(
         f"https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/{quote(name)}/json",
         params={"limit": 1},
@@ -249,6 +266,7 @@ def _resolve_cid(name: str) -> str:
             except UpstreamServiceError:
                 cid = None
             if cid:
+                logger.info("_resolve_cid: autocomplete resolved | name=%r suggestion=%r cid=%s", name, candidates[0], cid)
                 return cid
 
     raise BadRequestError(f"PubChem did not return a compound CID for \u201c{name}\u201d.")
@@ -276,11 +294,14 @@ def _fetch_sdf_with_fallback(cid: str) -> tuple[str, str]:
     the old sequential version paid a full request's worth of latency for
     every compound that hit that fallback path.
     """
+    logger.info("_fetch_sdf_with_fallback: submitting 3d+2d fetches for cid=%s", cid)
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_3d = pool.submit(_fetch_sdf, cid, "3d")
         f_2d = pool.submit(_fetch_sdf, cid, "2d")
         sdf_3d = f_3d.result()
+        logger.info("_fetch_sdf_with_fallback: 3d result in | cid=%s got=%s", cid, bool(sdf_3d))
         sdf_2d = f_2d.result()
+        logger.info("_fetch_sdf_with_fallback: 2d result in | cid=%s got=%s", cid, bool(sdf_2d))
     if sdf_3d:
         return sdf_3d, "3d"
     if sdf_2d:
@@ -289,13 +310,16 @@ def _fetch_sdf_with_fallback(cid: str) -> tuple[str, str]:
 
 
 def _fetch_sdf(cid: str, record_type: str) -> str | None:
+    logger.info("_fetch_sdf: starting | cid=%s type=%s thread=%s", cid, record_type, threading.current_thread().name)
     url = f"{PUG_BASE}/compound/cid/{quote(cid)}/SDF"
     resp = _get_with_retry(url, params={"record_type": record_type})
     if resp.status_code == 404:
+        logger.info("_fetch_sdf: 404 (no %s record) | cid=%s", record_type, cid)
         return None
     if not resp.ok:
         raise UpstreamServiceError(
             f"PubChem {record_type.upper()} structure lookup failed for CID {cid} (HTTP {resp.status_code})."
         )
     text = resp.text.strip()
+    logger.info("_fetch_sdf: done | cid=%s type=%s chars=%d", cid, record_type, len(text))
     return text or None
