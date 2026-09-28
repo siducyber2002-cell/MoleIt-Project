@@ -257,4 +257,33 @@ export const analyzeSymmetryFromPubchem = (query, tolerance) =>
 export const fetchPubchemStructure = (query) =>
   api.post('/api/symmetry/pubchem/structure', { query }).then(pick('preview'));
 
+// Point-group report download. The report is built on the backend
+// (POST /api/symmetry/report re-runs the analysis and returns a Markdown
+// file), so this asks for a Blob and hands back { blob, filename }.
+// Error responses come back as a Blob too when responseType is 'blob' — turn
+// them back into the normal JSON payload so extractErrorMessage() can read them.
+export const exportSymmetryReport = async (structure, tolerance, pubchemCid) => {
+  try {
+    const res = await api.post(
+      '/api/symmetry/report',
+      { structure, tolerance, pubchemCid: pubchemCid ? String(pubchemCid) : undefined },
+      { responseType: 'blob' }
+    );
+    const disposition = res.headers['content-disposition'] || '';
+    const match = /filename="?([^";]+)"?/i.exec(disposition);
+    const filename = res.headers['x-report-filename'] || (match && match[1]) || 'symmetry-report.md';
+    return { blob: res.data, filename };
+  } catch (err) {
+    const data = err?.response?.data;
+    if (typeof Blob !== 'undefined' && data instanceof Blob) {
+      try {
+        err.response.data = JSON.parse(await data.text());
+      } catch {
+        // body wasn't JSON — leave it, extractErrorMessage falls back gracefully
+      }
+    }
+    throw err;
+  }
+};
+
 export default api;

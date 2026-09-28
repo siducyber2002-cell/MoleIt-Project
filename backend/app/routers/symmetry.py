@@ -16,10 +16,11 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 import requests
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
 
 from .. import symmetry_engine as engine
+from .. import symmetry_report as report_builder
 from ..exceptions import BadRequestError, UpstreamServiceError, UpstreamUnavailableError
 from ..logging_config import get_logger
 from ..net import DeadlineExceeded, run_with_deadline
@@ -106,6 +107,12 @@ class AnalyzeRequest(BaseModel):
     tolerance: float | None = Field(None, ge=0.001, le=1.0)
 
 
+class ReportRequest(BaseModel):
+    structure: str = Field(..., description="The exact structure text the result was calculated from")
+    tolerance: float | None = Field(None, ge=0.001, le=1.0)
+    pubchemCid: str | None = Field(None, max_length=20, pattern=r"^\d+$", description="Optional PubChem CID, added to the report header")
+
+
 class PubchemRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Compound name or PubChem CID")
     tolerance: float | None = Field(None, ge=0.001, le=1.0)
@@ -151,6 +158,45 @@ def analyze_structure(payload: AnalyzeRequest):
         return err(503, "This structure's exact symmetry search took too long (likely a large and/or highly symmetric structure). Try a larger tolerance, or a smaller/simplified structure.")
     except Exception:
         logger.error("Symmetry analyze crashed", exc_info=True)
+        return err(500, "Internal server error")
+
+
+@router.post("/report")
+def export_report(payload: ReportRequest):
+    """Builds the downloadable point-group report and returns it as a file.
+
+    The browser sends only the structure text and tolerance; the analysis is
+    re-run here and the Markdown is generated server-side
+    (symmetry_report.py), so the exported numbers always come straight from
+    the engine rather than from whatever the client had in memory. Success
+    returns the raw file (Content-Disposition: attachment); failures use the
+    usual JSON error shape from responses.err().
+    """
+    logger.info("Symmetry report export requested | chars=%d tol=%s cid=%s", len(payload.structure), payload.tolerance, payload.pubchemCid)
+    try:
+        result = _run_analysis(payload.structure, payload.tolerance)
+        body = report_builder.build_report_markdown(result, pubchem_cid=payload.pubchemCid)
+        filename = report_builder.report_filename(result)
+        logger.info("Symmetry report export succeeded | group=%s file=%s bytes=%d", result["group"], filename, len(body))
+        return Response(
+            content=body.encode("utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Report-Filename": filename,
+                # Cross-origin fetches can only read these headers if they're exposed.
+                "Access-Control-Expose-Headers": "Content-Disposition, X-Report-Filename",
+                "Cache-Control": "no-store",
+            },
+        )
+    except BadRequestError as e:
+        logger.warning("Symmetry report export failed | reason=%s", e)
+        return err(400, str(e))
+    except DeadlineExceeded as e:
+        logger.warning("Symmetry report export timed out (deadline exceeded) | reason=%s", e)
+        return err(503, "This structure's exact symmetry search took too long (likely a large and/or highly symmetric structure). Try a larger tolerance, or a smaller/simplified structure.")
+    except Exception:
+        logger.error("Symmetry report export crashed", exc_info=True)
         return err(500, "Internal server error")
 
 

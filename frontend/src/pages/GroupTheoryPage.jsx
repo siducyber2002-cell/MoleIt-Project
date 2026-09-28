@@ -1,13 +1,36 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Orbit, Loader2, AlertTriangle, Search, ChevronDown, Sparkles,
-  RotateCcw, Info, Atom, Axis3d, FileDown, ListTree, XCircle, Radio,
+  RotateCcw, Info, Atom, Axis3d, FileDown, ListTree, XCircle, Radio, Star,
 } from 'lucide-react';
 import SymmetryElementsViewer, { KIND_META } from '../components/Viewer3D/SymmetryElementsViewer';
 import { Reveal, StaggerGroup, Word, InlineReveal } from '../components/motion/ScrollReveal';
-import { fetchSymmetryDemos, analyzeSymmetry, fetchPubchemStructure, extractErrorMessage } from '../api/api';
+import { fetchSymmetryDemos, analyzeSymmetry, fetchPubchemStructure, exportSymmetryReport, extractErrorMessage } from '../api/api';
 import { symmetryAtomsToMolBlock } from '../lib/symmetryMolblock';
 import './GroupTheoryPage.css';
+
+// Height of the 3-D viewers. A fixed 480px is taller than most phone screens
+// in landscape and eats the whole viewport in portrait, so scale it down.
+function useViewerHeight() {
+  const pick = () => {
+    if (typeof window === 'undefined') return 480;
+    const w = window.innerWidth;
+    if (w < 480) return 340;
+    if (w < 768) return 400;
+    return 480;
+  };
+  const [h, setH] = useState(pick);
+  useEffect(() => {
+    const onResize = () => setH(pick());
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+    };
+  }, []);
+  return h;
+}
 
 const PLACEHOLDER = `3
 water
@@ -17,86 +40,19 @@ H -0.757 0.586 0`;
 
 const OP_KIND_LABEL = { E: 'Identity', C: 'Rotation', i: 'Inversion', M: 'Mirror plane', S: 'Improper rotation' };
 
-// Builds a self-contained Markdown report from an analysis result and
-// triggers a browser download — no server round-trip needed, since every
-// field it uses is already sitting in `result` from the /analyze response.
-function downloadSymmetryReport(result) {
-  if (!result) return;
-  const lines = [];
-  lines.push(`# Symmetry report — ${result.groupPretty}`);
-  lines.push('');
-  lines.push(`**Formula:** ${result.formulaPretty}  `);
-  lines.push(`**Atoms:** ${result.atomCount}  `);
-  lines.push(`**Point group:** ${result.groupPretty}${result.groupDescription ? ` — ${result.groupDescription}` : ''}`);
-  lines.push('');
-  lines.push('## Detection summary');
-  lines.push('');
-  lines.push(`- Group order: ${result.orderLabel ? `${result.orderLabel} (infinite)` : `${result.detectedOps} / ${result.expectedOrder}`}`);
-  lines.push(`- Inversion center: ${result.inversion ? 'yes' : 'no'}`);
-  lines.push(`- Mirror planes: ${result.mirrorCount}`);
-  lines.push(`- Improper rotations: ${result.improperRotationCount}`);
-  lines.push(`- Rotational orders found: ${result.rotationalOrders?.join(', ') || 'none'}`);
-  lines.push(`- Linear molecule: ${result.linear ? 'yes' : 'no'}`);
-  lines.push(`- Tolerance used: ${result.tolerance} \u00c5`);
-  lines.push(`- Worst match error: ${result.maxError} \u00c5`);
-  if (typeof result.symmetryScore === 'number') lines.push(`- Symmetry score: ${result.symmetryScore}%`);
-  if (result.distortionWarning) lines.push(`- \u26a0\ufe0f ${result.distortionWarning}`);
-  lines.push('');
-  if (result.decisionTrace?.length) {
-    lines.push('## Why this point group');
-    lines.push('');
-    result.decisionTrace.forEach((line, i) => lines.push(`${i + 1}. ${line}`));
-    lines.push('');
-  }
-  if (result.rejectedTests?.length) {
-    lines.push('## Symmetry tests that did not pass');
-    lines.push('');
-    lines.push('| Element tested | Closest miss |');
-    lines.push('|---|---|');
-    result.rejectedTests.forEach((t) => lines.push(`| ${t.label} | ${t.errorAngstrom} \u00c5 |`));
-    lines.push('');
-  }
-  if (result.representation) {
-    const rep = result.representation;
-    lines.push('## Representation reduction');
-    lines.push('');
-    lines.push(`- \u0393(3N) = ${rep.gamma3N}`);
-    lines.push(`- \u0393(trans) = ${rep.gammaTrans}`);
-    lines.push(`- \u0393(rot) = ${rep.gammaRot}`);
-    lines.push(`- **\u0393(vib) = ${rep.gammaVib}**`);
-    lines.push('');
-    if (rep.validation) {
-      const v = rep.validation;
-      lines.push(`- Validation: \u0393(3N) accounts for ${v.gamma3NDimension}/${v.expectedDimension} Cartesian degrees of freedom` +
-        `${v.gamma3NMatchesAtomCount && v.decompositionConsistent ? ' \u2713' : ' \u2014 mismatch, treat this result with caution'}.`);
-      lines.push('');
-    }
-    if (rep.spectroscopy?.length) {
-      lines.push('### IR / Raman activity');
-      lines.push('');
-      lines.push('| Irrep | Modes | IR active | Raman active |');
-      lines.push('|---|---|---|---|');
-      rep.spectroscopy.forEach((s) => lines.push(`| ${s.irrep} | ${s.count} | ${s.irActive ? 'yes' : 'no'} | ${s.ramanActive ? 'yes' : 'no'}${s.silent ? ' (silent)' : ''} |`));
-      lines.push('');
-    }
-  } else if (result.representationError) {
-    lines.push(`## Representation reduction`);
-    lines.push('');
-    lines.push(`Not available: ${result.representationError}`);
-    lines.push('');
-  }
-  lines.push('---');
-  lines.push(`*Generated by the Group Theory tab \u00b7 tolerance ${result.tolerance} \u00c5*`);
+// Quick-start compounds shown under the PubChem search box.
+const QUICK_COMPOUNDS = ['water', 'ammonia', 'methane', 'benzene', 'ferrocene', 'sulfur hexafluoride'];
 
-  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+// Saves a Blob the backend returned as a file download.
+function saveBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `symmetry-report-${(result.formulaPretty || 'structure').replace(/[^a-z0-9]+/gi, '-')}.md`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 const TICKER_ITEMS = [
@@ -139,7 +95,21 @@ export default function GroupTheoryPage() {
   const [tolerance, setTolerance] = useState(saved?.tolerance ?? 0.08);
   const [pubchemQuery, setPubchemQuery] = useState(saved?.pubchemQuery || '');
 
-  const [loading, setLoading] = useState(false);
+  // Two independent busy flags: searching PubChem and calculating the point
+  // group are separate actions, so each button only ever spins for its own job.
+  const [searching, setSearching] = useState(false);
+  const [calculating, setCalculating] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const busy = searching || calculating;
+  // The exact structure + tolerance (+ PubChem CID) the current result was
+  // calculated from — this is what the backend re-analyzes for the export,
+  // so the report always matches the result on screen even if the text box
+  // has been edited since.
+  const [analyzed, setAnalyzed] = useState(() =>
+    saved?.result
+      ? { structure: saved.structure, tolerance: saved.tolerance ?? 0.08, cid: saved.pubchemMeta?.cid ?? null }
+      : null
+  );
   const [error, setError] = useState(null);
   const [result, setResult] = useState(saved?.result || null);
   const [pubchemMeta, setPubchemMeta] = useState(saved?.pubchemMeta || null);
@@ -152,7 +122,7 @@ export default function GroupTheoryPage() {
   // Which "load a structure" tab is showing — paste-a-structure or
   // search-PubChem. Purely a UI toggle so both ways to load a molecule
   // live in one card instead of two stacked ones.
-  const [loadMode, setLoadMode] = useState('paste');
+  const [loadMode, setLoadMode] = useState('pubchem');
   const [showDerivation, setShowDerivation] = useState(false);
   const [hoveredOp, setHoveredOp] = useState(null);
   const [pinnedOp, setPinnedOp] = useState(null);
@@ -196,18 +166,37 @@ export default function GroupTheoryPage() {
   // does the heavy lifting, so it only ever fires when the user explicitly
   // asks for it — either by clicking "Calculate point group" directly, or
   // by clicking it from the preview card after a PubChem search.
-  const runAnalyze = async (text = structure) => {
-    setLoading(true);
+  const runAnalyze = async (text = structure, cid = pubchemMeta?.cid ?? null) => {
+    setCalculating(true);
     setError(null);
     try {
       const r = await analyzeSymmetry(text, tolerance);
       setResult(r);
+      setAnalyzed({ structure: text, tolerance, cid });
       setPreview(null); // superseded by the full result now
     } catch (err) {
       setError(extractErrorMessage(err, "Couldn't analyze that structure."));
       setResult(null);
     } finally {
-      setLoading(false);
+      setCalculating(false);
+    }
+  };
+
+  // Export: the report is built on the backend (POST /api/symmetry/report),
+  // which re-runs the analysis on the exact structure behind the result and
+  // sends the finished file back — nothing is assembled in the browser.
+  const handleExport = async () => {
+    if (!result || exporting) return;
+    const src = analyzed || { structure, tolerance, cid: pubchemMeta?.cid ?? null };
+    setExporting(true);
+    setError(null);
+    try {
+      const { blob, filename } = await exportSymmetryReport(src.structure, src.tolerance, src.cid);
+      saveBlob(blob, filename);
+    } catch (err) {
+      setError(extractErrorMessage(err, "Couldn't export the report."));
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -217,15 +206,17 @@ export default function GroupTheoryPage() {
   // and was the source of the long delay, since point-group detection
   // scales with atom count/symmetry richness. The engine now only runs
   // when the user clicks "Calculate point group" afterwards.
-  const runPubchem = async () => {
-    if (!pubchemQuery.trim()) return;
-    setLoading(true);
+  const runPubchem = async (query = pubchemQuery) => {
+    const q = String(query || '').trim();
+    if (!q) return;
+    if (q !== pubchemQuery) setPubchemQuery(q);
+    setSearching(true);
     setError(null);
     setResult(null);
     setPreview(null);
     setPubchemMeta(null);
     try {
-      const p = await fetchPubchemStructure(pubchemQuery.trim());
+      const p = await fetchPubchemStructure(q);
       setStructure(p.sourceStructure || structure);
       setPreview(p);
       setPubchemMeta({ cid: p.pubchemCid, url: p.pubchemUrl });
@@ -233,7 +224,7 @@ export default function GroupTheoryPage() {
       setError(extractErrorMessage(err, 'Could not fetch that compound from PubChem.'));
       setPreview(null);
     } finally {
-      setLoading(false);
+      setSearching(false);
     }
   };
 
@@ -242,7 +233,7 @@ export default function GroupTheoryPage() {
     setPubchemQuery('');
     setPubchemMeta(null);
     setPreview(null);
-    runAnalyze(demo.xyz);
+    runAnalyze(demo.xyz, null);
   };
 
   const molBlock = useMemo(() => {
@@ -269,6 +260,8 @@ export default function GroupTheoryPage() {
   // margins, mobile overscroll/rubber-banding above or below the page —
   // showed the dark theme through. The navbar is a separate fixed element
   // and keeps its own dark background on purpose.
+  const viewerHeight = useViewerHeight();
+
   useEffect(() => {
     document.documentElement.classList.add('gt-light-scroll');
     document.body.classList.add('gt-light-scroll');
@@ -289,9 +282,9 @@ export default function GroupTheoryPage() {
 
   return (
     <div className="gt-page min-h-screen w-full overflow-x-clip">
-    <div className="mx-auto w-full max-w-[1680px] overflow-x-clip px-4 pb-24 pt-6 sm:px-6 lg:px-10">
+    <div className="gt-shell mx-auto w-full max-w-[1680px] overflow-x-clip px-3 pb-24 pt-6 sm:px-6 lg:px-10">
       {/* ---------------- hero ---------------- */}
-      <div className="gt-section gt-section-paper relative mb-6 px-5 py-8 sm:px-9 sm:py-12">
+      <div className="gt-section gt-section-paper relative mb-6 px-4 py-6 sm:px-9 sm:py-12">
         <div
           className="gt-hero-diamond pointer-events-none absolute -left-6 top-10 hidden h-10 w-10 border-2 border-[var(--gt-ink)]/25 sm:block"
           aria-hidden="true"
@@ -303,7 +296,7 @@ export default function GroupTheoryPage() {
               <span className="gt-kicker-num">01</span> Symmetry lab
             </Reveal>
 
-            <StaggerGroup as="h1" trigger="mount" className="gt-heading text-3xl sm:text-5xl lg:text-6xl">
+            <StaggerGroup as="h1" trigger="mount" className="gt-heading text-[1.85rem] sm:text-5xl lg:text-6xl">
               <Word>Find</Word> <Word>the</Word>{' '}
               <InlineReveal as="span" className="gt-mark">symmetry</InlineReveal>{' '}
               <Word>hiding</Word> <Word>in</Word> <Word>any</Word> <Word>molecule.</Word>
@@ -322,7 +315,7 @@ export default function GroupTheoryPage() {
             </Reveal>
           </div>
 
-          <Reveal trigger="mount" delay={0.15} direction="left" className="hidden lg:block">
+          <Reveal trigger="mount" delay={0.15} direction="up" className="min-w-0">
             <GTHeroGraphic />
           </Reveal>
         </div>
@@ -338,9 +331,9 @@ export default function GroupTheoryPage() {
         </div>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,420px)_1fr]">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
         {/* ---------------- input panel ---------------- */}
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
           <div className="gt-section gt-section-light relative px-4 py-5 sm:px-5 sm:py-6">
             <div className="relative z-10">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -348,22 +341,58 @@ export default function GroupTheoryPage() {
                 <div className="gt-tab-group">
                   <button
                     type="button"
+                    onClick={() => setLoadMode('pubchem')}
+                    className={`gt-tab gt-tab-hot ${loadMode === 'pubchem' ? 'is-active' : ''}`}
+                  >
+                    <Search size={12} /> PubChem
+                    <span className="gt-tab-badge"><Star size={8} fill="currentColor" /> Start here</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setLoadMode('paste')}
                     className={`gt-tab ${loadMode === 'paste' ? 'is-active' : ''}`}
                   >
                     Paste
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setLoadMode('pubchem')}
-                    className={`gt-tab ${loadMode === 'pubchem' ? 'is-active' : ''}`}
-                  >
-                    PubChem
-                  </button>
                 </div>
               </div>
 
-              {loadMode === 'paste' ? (
+              {loadMode === 'pubchem' ? (
+                <div className="mt-4">
+                  <div className="gt-spot">
+                    <label className="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-[var(--gt-ink)]">
+                      <Search size={13} /> Search any compound or CID
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        value={pubchemQuery}
+                        onChange={(e) => setPubchemQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && runPubchem()}
+                        placeholder="e.g. \u201cferrocene\u201d or 2519"
+                        className="gt-input min-w-0 flex-1 text-sm"
+                        enterKeyHint="search"
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                      />
+                      <button onClick={() => runPubchem()} disabled={busy} className="gt-btn shrink-0 px-4" aria-label="Search PubChem">
+                        {searching ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                        <span className="hidden min-[400px]:inline">Search</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-semibold text-[var(--gt-ink-soft)]">Try:</span>
+                    {QUICK_COMPOUNDS.map((name) => (
+                      <button key={name} type="button" onClick={() => runPubchem(name)} disabled={busy} className="gt-chip">
+                        {name}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[11px] text-[var(--gt-ink)]/60">
+                    Pulls the real 3-D structure first &mdash; nothing gets calculated until you say so.
+                  </p>
+                </div>
+              ) : (
                 <>
                   <label className="mb-2 mt-4 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink)]/80">
                     <Atom size={13} /> XYZ / SDF / PDB
@@ -382,28 +411,6 @@ export default function GroupTheoryPage() {
                     className="gt-textarea text-xs"
                   />
                 </>
-              ) : (
-                <div className="mt-4">
-                  <label className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink)]/80">
-                    <Search size={13} /> Compound name or CID
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      value={pubchemQuery}
-                      onChange={(e) => setPubchemQuery(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && runPubchem()}
-                      placeholder="e.g. \u201cferrocene\u201d or 2519"
-                      className="gt-input min-w-0 flex-1 text-sm"
-                      autoFocus
-                    />
-                    <button onClick={runPubchem} disabled={loading} className="gt-btn-ghost px-3 shrink-0">
-                      {loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-                    </button>
-                  </div>
-                  <p className="mt-2 text-[11px] text-[var(--gt-ink)]/60">
-                    Pulls the real 3-D structure first &mdash; nothing gets calculated until you say so.
-                  </p>
-                </div>
               )}
 
               <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
@@ -419,8 +426,8 @@ export default function GroupTheoryPage() {
                   />
                   <span className="text-[var(--gt-ink)]/70">&Aring;</span>
                 </label>
-                <button onClick={() => runAnalyze()} disabled={loading} className="gt-btn w-full justify-center sm:w-auto">
-                  {loading ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                <button onClick={() => runAnalyze()} disabled={busy} className="gt-btn w-full justify-center sm:w-auto">
+                  {calculating ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
                   Calculate point group
                 </button>
               </div>
@@ -471,10 +478,10 @@ export default function GroupTheoryPage() {
         </div>
 
         {/* ---------------- results panel ---------------- */}
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
           <span className="gt-kicker text-[var(--gt-ink-soft)]"><span className="gt-kicker-num">03</span> Results</span>
 
-          {!result && !preview && !loading && (
+          {!result && !preview && !busy && (
             <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-[18px] border-2 border-dashed border-[var(--gt-ink)]/30 bg-[var(--gt-paper-soft)] p-8 text-center">
               <Orbit size={28} className="mb-2 text-[var(--gt-ink-soft)]" />
               <p className="text-sm text-[var(--gt-ink-soft)]">Paste a structure, pick a demo, or fetch one from PubChem to get started.</p>
@@ -485,7 +492,7 @@ export default function GroupTheoryPage() {
             <>
               <Reveal className="gt-card p-4 sm:p-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
+                  <div className="min-w-0">
                     <div className="gt-heading text-xl text-[var(--gt-ink)] sm:text-2xl">{preview.formulaPretty}</div>
                     <p className="mt-1 text-xs text-[var(--gt-ink-soft)]">
                       3-D structure loaded &middot; {preview.atomCount} atoms &middot; {preview.bondCount} bonds
@@ -495,8 +502,8 @@ export default function GroupTheoryPage() {
                       &ldquo;Calculate point group&rdquo; when you&rsquo;re ready to run the symmetry engine.
                     </p>
                   </div>
-                  <button onClick={() => runAnalyze()} disabled={loading} className="gt-btn w-full justify-center sm:w-auto">
-                    {loading ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                  <button onClick={() => runAnalyze()} disabled={busy} className="gt-btn w-full justify-center sm:w-auto">
+                    {calculating ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
                     Calculate point group
                   </button>
                 </div>
@@ -524,7 +531,7 @@ export default function GroupTheoryPage() {
                       operations={[]}
                       groupPretty={null}
                       formulaPretty={preview.formulaPretty}
-                      height={480}
+                      height={viewerHeight}
                     />
                   </div>
                 </Reveal>
@@ -536,7 +543,7 @@ export default function GroupTheoryPage() {
             <>
               <Reveal className="gt-card p-4 sm:p-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
+                  <div className="min-w-0">
                     <div className="gt-heading text-3xl text-[var(--gt-teal)] sm:text-4xl">{result.groupPretty}</div>
                     <p className="mt-1 text-xs text-[var(--gt-ink-soft)]">
                       Detected automatically from {result.atomCount} atoms &middot; formula {result.formulaPretty}
@@ -547,12 +554,13 @@ export default function GroupTheoryPage() {
                       </p>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => downloadSymmetryReport(result)} className="gt-btn-ghost">
-                      <FileDown size={12} /> Export report
+                  <div className="flex w-full items-center gap-2 sm:w-auto">
+                    <button onClick={handleExport} disabled={exporting || busy} className="gt-btn-ghost flex-1 justify-center disabled:opacity-60 sm:flex-none">
+                      {exporting ? <Loader2 size={12} className="animate-spin" /> : <FileDown size={12} />}
+                      {exporting ? 'Exporting\u2026' : 'Export report'}
                     </button>
-                    <button onClick={() => runAnalyze()} className="gt-btn-ghost">
-                      <RotateCcw size={12} /> Re-run
+                    <button onClick={() => runAnalyze()} disabled={busy} className="gt-btn-ghost flex-1 justify-center disabled:opacity-60 sm:flex-none">
+                      {calculating ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} Re-run
                     </button>
                   </div>
                 </div>
@@ -595,7 +603,7 @@ export default function GroupTheoryPage() {
                       operations={result.operations}
                       groupPretty={result.groupPretty}
                       formulaPretty={result.formulaPretty}
-                      height={480}
+                      height={viewerHeight}
                       highlightLabel={activeHighlight}
                       onHighlightChange={setHoveredOp}
                       playRequest={playRequest}
@@ -613,14 +621,14 @@ export default function GroupTheoryPage() {
                 </p>
                 <div className="space-y-2">
                   {opGroups.map(([kind, labels]) => (
-                    <div key={kind} className="flex flex-wrap items-center gap-1.5">
-                      <span className="flex w-32 shrink-0 items-center gap-1.5 text-[11px] text-[var(--gt-ink-soft)]">
+                    <div key={kind} className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                      <span className="flex w-full shrink-0 items-center gap-1.5 text-[11px] text-[var(--gt-ink-soft)] sm:w-32">
                         {KIND_META[kind] && (
                           <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: KIND_META[kind].color }} />
                         )}
                         {OP_KIND_LABEL[kind] || kind} ({labels.length})
                       </span>
-                      <div className="flex flex-wrap gap-1">
+                      <div className="flex min-w-0 flex-wrap gap-1.5 sm:gap-1">
                         {labels.slice(0, 24).map((l, i) => {
                           const isActive = activeHighlight === l;
                           return (
@@ -692,15 +700,15 @@ export default function GroupTheoryPage() {
                   <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-[var(--gt-teal)]">
                     Representation reduction
                   </div>
-                  <div className="space-y-1 rounded-lg border-2 border-[var(--gt-ink)]/10 bg-[var(--gt-paper-soft)] p-3 font-mono text-[12px] text-[var(--gt-ink)]">
+                  <div className="space-y-1 break-words rounded-lg border-2 border-[var(--gt-ink)]/10 bg-[var(--gt-paper-soft)] p-3 font-mono text-[12px] text-[var(--gt-ink)] [overflow-wrap:anywhere]">
                     <div>&Gamma;<sub>3N</sub> = {result.representation.gamma3N}</div>
                     <div>&Gamma;<sub>trans</sub> = {result.representation.gammaTrans}</div>
                     <div>&Gamma;<sub>rot</sub> = {result.representation.gammaRot}</div>
                     <div className="text-[#b46a13] font-semibold">&Gamma;<sub>vib</sub> = {result.representation.gammaVib}</div>
                   </div>
 
-                  <div className="mt-4 overflow-x-auto">
-                    <table className="w-full min-w-[420px] text-left text-xs text-[var(--gt-ink)]">
+                  <div className="gt-chartable-wrap mt-4 overflow-x-auto">
+                    <table className="gt-chartable w-full min-w-[420px] text-left text-xs text-[var(--gt-ink)]">
                       <thead>
                         <tr className="text-[var(--gt-ink-soft)]">
                           <th className="py-1 pr-3 font-medium">Class</th>
@@ -752,8 +760,8 @@ export default function GroupTheoryPage() {
                       <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink-soft)]">
                         <Radio size={13} /> IR / Raman activity
                       </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full min-w-[320px] text-left text-xs text-[var(--gt-ink)]">
+                      <div className="gt-chartable-wrap overflow-x-auto">
+                        <table className="gt-chartable w-full min-w-[320px] text-left text-xs text-[var(--gt-ink)]">
                           <thead>
                             <tr className="text-[var(--gt-ink-soft)]">
                               <th className="py-1 pr-3 font-medium">Irrep</th>
@@ -841,29 +849,135 @@ function Stat({ label, value }) {
   );
 }
 
-/** Hero graphic — a big sky-blue block with a rotating symmetry-axis ring
- *  and an orbiting "electron" dot, echoing the page's search/inspection
- *  theme without depending on the app's dark 3-D viewer or its neon
- *  QuantumOrbitAnimation. Pure SVG + CSS, self-contained to this page. */
+/** Hero graphic — "the four moves". Benzene (D6h) stays put while ONE tagged
+ *  atom (orange) is pushed through the symmetry operations that define a point
+ *  group: E (identity), C3 (rotate 120 deg), sigma-v (reflect through a mirror
+ *  plane) and i (inversion through the centre). The molecule looks identical
+ *  after every move — that is exactly what makes it a symmetry operation.
+ *  Pure SVG + CSS (see the gt-sym-* rules in GroupTheoryPage.css). */
+const SYM_STEPS = [
+  { sym: 'E', name: 'Identity', hint: 'do nothing' },
+  { sym: 'C\u2083', name: 'Rotation', hint: 'spin 120\u00b0' },
+  { sym: '\u03c3v', name: 'Mirror plane', hint: 'reflect' },
+  { sym: 'i', name: 'Inversion', hint: 'through the centre' },
+];
+
 function GTHeroGraphic() {
+  const cx = 100;
+  const cy = 75;
+  const r = 44; // C-C ring radius
+  const rH = 62; // H position radius
+  const verts = [90, 30, -30, -90, -150, 150].map((deg) => {
+    const a = (deg * Math.PI) / 180;
+    return { c: [cx + r * Math.cos(a), cy - r * Math.sin(a)], h: [cx + rH * Math.cos(a), cy - rH * Math.sin(a)] };
+  });
+  // tagged atom sits on the 30 deg vertex (upper right)
+  const tag = verts[1].c;
+
   return (
     <div
-      className="relative flex aspect-square w-full max-w-[280px] items-center justify-center overflow-hidden rounded-[26px] border-2 border-[var(--gt-ink)] ml-auto"
-      style={{ background: 'var(--gt-sky)', boxShadow: '8px 8px 0 var(--gt-ink)' }}
+      className="gt-sym relative mx-auto flex aspect-square w-full max-w-[250px] flex-col overflow-hidden rounded-[22px] border-2 border-[var(--gt-ink)] sm:max-w-[280px] lg:ml-auto lg:mr-0"
+      style={{ background: 'var(--gt-sky)', boxShadow: '7px 7px 0 var(--gt-ink)' }}
+      role="img"
+      aria-label="Animation: a benzene molecule with one tagged atom being moved by the symmetry operations identity, C3 rotation, mirror plane and inversion"
     >
-      <div
-        className="pointer-events-none absolute inset-0 opacity-25"
-        style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, white 1.5px, transparent 0)', backgroundSize: '20px 20px' }}
-      />
-      <svg viewBox="0 0 200 200" className="relative z-10 h-4/5 w-4/5">
-        <g className="gt-hero-shape" style={{ transformOrigin: '100px 100px' }}>
-          <circle cx="100" cy="100" r="70" fill="none" stroke="#fff" strokeWidth="10" />
-          <ellipse cx="100" cy="100" rx="70" ry="26" fill="none" stroke="#16191b" strokeWidth="3" opacity="0.35" />
-        </g>
-        <circle cx="100" cy="100" r="16" fill="#16191b" />
-        <circle cx="100" cy="100" r="7" fill="var(--gt-orange)" />
-        <circle className="gt-hero-dot" cx="170" cy="100" r="8" fill="#16191b" />
-      </svg>
+      <div className="relative min-h-0 flex-1">
+        <span className="absolute left-2.5 top-2 z-10 rounded-full border-[1.5px] border-[var(--gt-ink)] bg-[#fffdf8] px-2 py-0.5 font-mono text-[10px] font-bold leading-none text-[var(--gt-ink)]">
+          C&#8326;H&#8326; &middot; D&#8326;&#8341;
+        </span>
+
+        <svg viewBox="0 0 200 150" className="absolute inset-0 h-full w-full" preserveAspectRatio="xMidYMid meet">
+          {/* mirror plane (only visible during the sigma-v step) */}
+          <g className="gt-sym-mirror">
+            <rect x={cx - 1.5} y="6" width="3" height="138" fill="#fff" opacity="0.45" />
+            <line x1={cx} y1="6" x2={cx} y2="144" stroke="#16191b" strokeWidth="1.6" strokeDasharray="5 4" />
+          </g>
+
+          {/* inversion line through the centre (only during the i step) */}
+          <g className="gt-sym-inv">
+            <line x1={cx - 48.5} y1={cy + 28} x2={cx + 48.5} y2={cy - 28} stroke="#16191b" strokeWidth="1.6" strokeDasharray="4 4" />
+          </g>
+
+          {/* rotation arc (only during the C3 step) */}
+          <path
+            className="gt-sym-arc"
+            d={`M ${cx + 28 * Math.cos(Math.PI / 6)} ${cy - 28 * Math.sin(Math.PI / 6)} A 28 28 0 0 1 ${cx} ${cy + 28}`}
+            fill="none"
+            stroke="#16191b"
+            strokeWidth="2.4"
+            strokeLinecap="round"
+            pathLength="100"
+            strokeDasharray="100"
+          />
+          {/* arrowhead at the end of the arc (pointing left, the direction of travel at the bottom of the ring) */}
+          <polygon className="gt-sym-arrowhead" points={`${cx + 4},${cy + 22.5} ${cx - 4},${cy + 28} ${cx + 4},${cy + 33.5}`} fill="#16191b" />
+
+          {/* the molecule itself never moves */}
+          <g>
+            {verts.map((v, i) => (
+              <line key={`h-${i}`} x1={v.c[0]} y1={v.c[1]} x2={v.h[0]} y2={v.h[1]} stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+            ))}
+            <polygon points={verts.map((v) => v.c.join(',')).join(' ')} fill="none" stroke="#fff" strokeWidth="4" strokeLinejoin="round" />
+            <polygon points={verts.map((v) => v.c.join(',')).join(' ')} fill="none" stroke="#16191b" strokeWidth="0.9" strokeLinejoin="round" opacity="0.35" />
+            {verts.map((v, i) => (
+              <circle key={`hh-${i}`} cx={v.h[0]} cy={v.h[1]} r="4" fill="#fff" stroke="#16191b" strokeWidth="1.2" />
+            ))}
+            {verts.map((v, i) => (
+              <circle key={`c-${i}`} cx={v.c[0]} cy={v.c[1]} r="7" fill="#fff" stroke="#16191b" strokeWidth="2" />
+            ))}
+            {/* C6 axis symbol at the centre */}
+            <polygon
+              points={[0, 60, 120, 180, 240, 300].map((d) => {
+                const a = (d * Math.PI) / 180;
+                return `${cx + 5 * Math.cos(a)},${cy + 5 * Math.sin(a)}`;
+              }).join(' ')}
+              fill="#16191b"
+            />
+            <circle className="gt-sym-center" cx={cx} cy={cy} r="5" fill="none" stroke="#f3a53c" strokeWidth="2" />
+          </g>
+
+          {/* where the tagged atom started — a dashed "home" ring */}
+          <circle cx={tag[0]} cy={tag[1]} r="11" fill="none" stroke="#16191b" strokeWidth="1.4" strokeDasharray="3 3" opacity="0.6" />
+          <circle className="gt-sym-pulse" cx={tag[0]} cy={tag[1]} r="9" fill="none" stroke="#f3a53c" strokeWidth="2.5" />
+
+          {/* the tagged atom: three nested groups, one per kind of motion */}
+          <g className="gt-sym-tag">
+            <g className="gt-sym-rot">
+              <g className="gt-sym-refl">
+                <g className="gt-sym-invert">
+                  <circle cx={tag[0]} cy={tag[1]} r="8.5" fill="#f3a53c" stroke="#16191b" strokeWidth="2.4" />
+                  <circle cx={tag[0] - 2.2} cy={tag[1] - 2.4} r="2" fill="#fff" opacity="0.7" />
+                </g>
+              </g>
+            </g>
+          </g>
+        </svg>
+      </div>
+
+      {/* caption strip: current operation + progress dots */}
+      <div className="relative z-10 flex h-[27%] items-center justify-between gap-2 border-t-2 border-[var(--gt-ink)] bg-[#fffdf8] px-3">
+        <div className="relative h-full min-w-0 flex-1">
+          {SYM_STEPS.map((st, i) => (
+            <div
+              key={st.sym}
+              className="gt-sym-label absolute inset-0 flex items-center gap-2.5"
+              style={{ animationDelay: `${i * 3}s` }}
+              aria-hidden={i !== 0 ? 'true' : undefined}
+            >
+              <span className="gt-heading text-[26px] leading-none text-[var(--gt-teal)] sm:text-[30px]">{st.sym}</span>
+              <span className="min-w-0 leading-tight">
+                <span className="block truncate font-display text-[11.5px] font-bold text-[var(--gt-ink)]">{st.name}</span>
+                <span className="block truncate text-[10px] text-[var(--gt-ink-soft)]">{st.hint}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5" aria-hidden="true">
+          {SYM_STEPS.map((st, i) => (
+            <span key={st.sym} className="gt-sym-dot" style={{ animationDelay: `${i * 3}s` }} />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

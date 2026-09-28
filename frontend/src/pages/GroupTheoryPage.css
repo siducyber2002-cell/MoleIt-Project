@@ -25,6 +25,21 @@
   background: var(--gt-paper);
   color: var(--gt-ink);
   font-family: var(--font-body);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+/* Android Chrome: 100vh is taller than the visible area while the URL bar is showing */
+.gt-page.min-h-screen { min-height: 100vh; min-height: 100dvh; }
+.gt-shell {
+  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+  padding-bottom: max(6rem, calc(env(safe-area-inset-bottom) + 4rem));
+}
+@media (min-width: 640px) {
+  .gt-shell { padding-left: max(1.5rem, env(safe-area-inset-left)); padding-right: max(1.5rem, env(safe-area-inset-right)); }
+}
+@media (min-width: 1024px) {
+  .gt-shell { padding-left: 2.5rem; padding-right: 2.5rem; }
 }
 
 .gt-page ::selection { background: var(--gt-orange); color: var(--gt-ink); }
@@ -109,9 +124,11 @@ body.gt-light-scroll {
   box-shadow: var(--gt-shadow-sm);
   transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
-.gt-card:hover {
-  transform: translate(-2px, -2px);
-  box-shadow: 6px 6px 0 var(--gt-line);
+@media (hover: hover) {
+  .gt-card:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 6px 6px 0 var(--gt-line);
+  }
 }
 .gt-card-flat {
   background: #fffdf8;
@@ -141,11 +158,13 @@ body.gt-light-scroll {
   box-shadow: var(--gt-shadow-sm);
   transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
-.gt-btn:hover:not(:disabled) {
-  background: var(--gt-orange);
-  color: var(--gt-ink);
-  transform: translate(-2px, -2px);
-  box-shadow: 6px 6px 0 var(--gt-line);
+@media (hover: hover) {
+  .gt-btn:hover:not(:disabled) {
+    background: var(--gt-orange);
+    color: var(--gt-ink);
+    transform: translate(-2px, -2px);
+    box-shadow: 6px 6px 0 var(--gt-line);
+  }
 }
 .gt-btn:active:not(:disabled) {
   transform: translate(0, 0);
@@ -181,10 +200,13 @@ body.gt-light-scroll {
   background: #fffdf8;
   transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
-.gt-chip:hover {
-  transform: translateY(-2px);
-  background: var(--gt-sky);
+@media (hover: hover) {
+  .gt-chip:hover {
+    transform: translateY(-2px);
+    background: var(--gt-sky);
+  }
 }
+.gt-chip:active { background: var(--gt-sky); }
 
 .gt-tag {
   display: inline-flex;
@@ -237,8 +259,49 @@ body.gt-light-scroll {
   color: var(--gt-ink-soft);
   transition: background 0.15s ease, color 0.15s ease;
 }
+.gt-tab { position: relative; display: inline-flex; align-items: center; gap: 0.35em; }
 .gt-tab:hover { color: var(--gt-ink); }
 .gt-tab.is-active { background: var(--gt-ink); color: var(--gt-paper); }
+
+/* The PubChem tab is the main way in — make it read as the first thing to click */
+.gt-tab-hot:not(.is-active) { background: var(--gt-orange-soft); color: var(--gt-ink); }
+.gt-tab-badge {
+  position: absolute;
+  top: -13px;
+  right: -6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  padding: 2px 6px;
+  border: 1.5px solid var(--gt-ink);
+  border-radius: 999px;
+  background: var(--gt-orange);
+  color: var(--gt-ink);
+  font-family: var(--font-display);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ---------- PubChem search spotlight ---------- */
+.gt-spot {
+  background: var(--gt-orange-soft);
+  border: 2px solid var(--gt-line);
+  border-radius: 16px;
+  padding: 0.85rem 0.85rem 0.9rem;
+  box-shadow: var(--gt-shadow-sm);
+  animation: gt-spot-ping 2.4s ease-out 0.6s 2;
+}
+@keyframes gt-spot-ping {
+  0% { box-shadow: var(--gt-shadow-sm), 0 0 0 0 rgba(243, 165, 60, 0.7); }
+  100% { box-shadow: var(--gt-shadow-sm), 0 0 0 14px rgba(243, 165, 60, 0); }
+}
+.gt-spot .gt-input:focus { box-shadow: 0 0 0 3px var(--gt-orange); }
+.gt-chip:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ---------- form controls ---------- */
 .gt-input,
@@ -336,24 +399,125 @@ body.gt-light-scroll {
 /* ---------- viewer card (the main attraction) ---------- */
 .gt-viewer-card { box-shadow: var(--gt-shadow); }
 
-/* ---------- hero graphic ---------- */
-.gt-hero-shape {
-  animation: gt-spin-slow 7s linear infinite;
-  transform-origin: 50% 50%;
+/* ---------- hero graphic: "the four moves" ----------
+   One 12s loop, four 3s steps:  E -> C3 -> sigma-v -> i.
+   A tagged (orange) atom is moved by each operation while the benzene ring
+   itself stays put. Three nested <g>s (rot / refl / invert) each own one
+   kind of motion so the transform lists never have to be interpolated
+   against each other. Reset jumps happen while the tag is faded out. */
+.gt-sym-tag,
+.gt-sym-rot,
+.gt-sym-refl,
+.gt-sym-invert,
+.gt-sym-pulse {
+  transform-box: view-box;
 }
-@keyframes gt-spin-slow {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+.gt-sym-tag { animation: gt-sym-fade 12s ease-in-out infinite; }
+.gt-sym-rot { transform-origin: 100px 75px; animation: gt-sym-rot 12s ease-in-out infinite; }
+.gt-sym-refl { animation: gt-sym-refl 12s ease-in-out infinite; }
+.gt-sym-invert { animation: gt-sym-invert 12s ease-in-out infinite; }
+
+@keyframes gt-sym-fade {
+  0%, 46% { opacity: 1; }
+  48% { opacity: 0; }
+  50%, 71% { opacity: 1; }
+  73% { opacity: 0; }
+  75%, 96% { opacity: 1; }
+  98% { opacity: 0; }
+  100% { opacity: 1; }
 }
-.gt-hero-mirror {
-  animation: gt-mirror-flash 4.5s ease-in-out infinite;
-  transform-origin: 50% 50%;
+/* step 2 (25-50%): C3, rotate 120deg about the centre */
+@keyframes gt-sym-rot {
+  0%, 28% { transform: rotate(0deg); }
+  40%, 48.5% { transform: rotate(120deg); }
+  48.6%, 100% { transform: rotate(0deg); }
 }
-@keyframes gt-mirror-flash {
-  0%, 55% { opacity: 0; }
-  75%, 90% { opacity: 1; }
-  100% { opacity: 0; }
+/* step 3 (50-75%): sigma-v, slide straight across the vertical mirror plane */
+@keyframes gt-sym-refl {
+  0%, 53% { transform: translate(0, 0); }
+  65%, 73.5% { transform: translate(-76.2px, 0); }
+  73.6%, 100% { transform: translate(0, 0); }
 }
+/* step 4 (75-100%): i, straight through the centre to the opposite atom */
+@keyframes gt-sym-invert {
+  0%, 78% { transform: translate(0, 0); }
+  90%, 98.5% { transform: translate(-76.2px, 44px); }
+  98.6%, 100% { transform: translate(0, 0); }
+}
+
+/* step 1: "identity" — the tag just pulses in place */
+.gt-sym-pulse {
+  transform-origin: 138.1px 53px;
+  opacity: 0;
+  animation: gt-sym-pulse 12s ease-out infinite;
+}
+@keyframes gt-sym-pulse {
+  0%, 2% { transform: scale(1); opacity: 0.9; }
+  10% { transform: scale(2.4); opacity: 0; }
+  12% { transform: scale(1); opacity: 0; }
+  14% { transform: scale(1); opacity: 0.9; }
+  22% { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+/* helpers that only show during their own step */
+.gt-sym-arc { stroke-dashoffset: 100; opacity: 0; animation: gt-sym-arc 12s ease-in-out infinite; }
+@keyframes gt-sym-arc {
+  0%, 27% { stroke-dashoffset: 100; opacity: 0; }
+  28% { stroke-dashoffset: 100; opacity: 1; }
+  40%, 47% { stroke-dashoffset: 0; opacity: 1; }
+  49%, 100% { stroke-dashoffset: 0; opacity: 0; }
+}
+.gt-sym-arrowhead { opacity: 0; animation: gt-sym-arrowhead 12s ease-in-out infinite; }
+@keyframes gt-sym-arrowhead {
+  0%, 38% { opacity: 0; }
+  40%, 47% { opacity: 1; }
+  49%, 100% { opacity: 0; }
+}
+.gt-sym-mirror { opacity: 0; animation: gt-sym-mirror 12s ease-in-out infinite; }
+@keyframes gt-sym-mirror {
+  0%, 50% { opacity: 0; }
+  53%, 71% { opacity: 1; }
+  74%, 100% { opacity: 0; }
+}
+.gt-sym-inv { opacity: 0; animation: gt-sym-inv 12s ease-in-out infinite; }
+@keyframes gt-sym-inv {
+  0%, 75% { opacity: 0; }
+  78%, 96% { opacity: 1; }
+  99%, 100% { opacity: 0; }
+}
+.gt-sym-center {
+  transform-origin: 100px 75px;
+  opacity: 0;
+  animation: gt-sym-center 12s ease-out infinite;
+}
+@keyframes gt-sym-center {
+  0%, 76% { transform: scale(1); opacity: 0; }
+  80% { transform: scale(1); opacity: 1; }
+  92%, 100% { transform: scale(3.2); opacity: 0; }
+}
+
+/* caption strip: 4 labels stacked, each on for its own 3s; dots track the step */
+.gt-sym-label { opacity: 0; animation: gt-sym-label 12s ease-in-out infinite; }
+@keyframes gt-sym-label {
+  0% { opacity: 0; transform: translateY(6px); }
+  2.5%, 22% { opacity: 1; transform: translateY(0); }
+  24.5%, 100% { opacity: 0; transform: translateY(-6px); }
+}
+.gt-sym-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1.5px solid var(--gt-ink);
+  background: transparent;
+  animation: gt-sym-dot 12s ease-in-out infinite;
+}
+@keyframes gt-sym-dot {
+  0%, 24% { background: var(--gt-orange); }
+  25%, 100% { background: transparent; }
+}
+/* first label / dot must be visible before their first cycle kicks in */
+.gt-sym-label:first-child { opacity: 1; }
 .gt-hero-diamond {
   animation: gt-float 5.5s ease-in-out infinite;
 }
@@ -400,10 +564,14 @@ body.gt-light-scroll {
 .gt-op-btn.is-active { background: var(--gt-ink); color: var(--gt-paper); }
 
 @media (prefers-reduced-motion: reduce) {
-  .gt-hero-shape, .gt-hero-mirror, .gt-hero-diamond, .gt-ticker-track, .gt-mark {
+  .gt-hero-diamond, .gt-ticker-track, .gt-mark,
+  .gt-sym-tag, .gt-sym-rot, .gt-sym-refl, .gt-sym-invert, .gt-sym-pulse,
+  .gt-spot, .gt-sym-arc, .gt-sym-arrowhead, .gt-sym-mirror, .gt-sym-inv, .gt-sym-center, .gt-sym-label, .gt-sym-dot {
     animation: none !important;
   }
-  .gt-hero-mirror { opacity: 0.5; }
+  .gt-sym-pulse, .gt-sym-arc, .gt-sym-arrowhead, .gt-sym-mirror, .gt-sym-inv, .gt-sym-center { opacity: 0; }
+  .gt-sym-label { opacity: 0; transform: none; }
+  .gt-sym-label:first-child { opacity: 1; }
   .gt-mark { background-size: 100% 100%; }
 }
 
@@ -437,7 +605,35 @@ html.gt-light-scroll .moleit-logo--dark .moleit-logo-shimmer {
   .gt-chip { min-height: 36px; padding-top: 7px; padding-bottom: 7px; font-size: 12px; }
   .gt-btn, .gt-btn-ghost { min-height: 44px; }
   .gt-input { min-height: 44px; }
+  .gt-spot { padding: 0.75rem 0.7rem 0.8rem; }
+  .gt-spot .gt-input { min-height: 48px; }
   .gt-op-btn { min-height: 34px; padding: 6px 10px; font-size: 12px; }
   .gt-tolerance-box { min-height: 44px; width: 100%; justify-content: space-between; }
   .gt-tab { min-height: 32px; padding: 6px 12px; font-size: 12px; }
+
+  /* long chips / labels wrap instead of stretching the card */
+  .gt-op-btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .gt-status-line { overflow-wrap: anywhere; }
+  .gt-card, .gt-card-flat { min-width: 0; }
+  .gt-section { border-radius: 22px; }
+  .gt-heading { overflow-wrap: break-word; }
+
+  /* less chrome on small screens: lighter sticker shadows so cards don't touch the screen edge */
+  .gt-card, .gt-section-light { box-shadow: 3px 3px 0 var(--gt-line); }
+  .gt-viewer-card { box-shadow: 4px 4px 0 var(--gt-line); }
+
+  /* step strip: keep the three pills on one tidy wrapped row */
+  .gt-steps { gap: 0.35em; }
+  .gt-step { font-size: 11.5px; padding: 0.3em 0.65em 0.3em 0.5em; }
+}
+
+/* very small phones (<= 360px wide) */
+@media (max-width: 380px) {
+  .gt-step-arrow { display: none; }
+  .gt-btn { font-size: 13px; padding-left: 0.9em; padding-right: 0.9em; }
+}
+
+/* landscape phones: don't let the hero graphic eat the whole (short) screen */
+@media (max-height: 480px) and (orientation: landscape) {
+  .gt-sym { max-width: 200px; }
 }
