@@ -569,26 +569,28 @@ def _unit_dirs(dirs):
     return A / lens[:, None]
 
 
-def _prescreen_rot(atoms, dirs, tol, n_max):
-    """Per-direction count of atoms that make a proper rotation about that
-    direction impossible (0 = cannot be ruled out). EXACT necessary condition.
+def _prescreen_rot(atoms, dirs, tol, n_top):
+    """bad[k, n] (n = 2..n_top): number of atoms that make a C_n rotation about
+    direction k impossible. bad == 0 means "cannot be ruled out". EXACT
+    necessary conditions, never over-strict.
 
     For a unit direction a let t = p.a (height along a) and r = |p - t a|
-    (distance from a). A rotation about a keeps every atom's (t, r). Any atom
-    further than tol / (2 sin(pi/n_max)) from the axis cannot map onto itself,
-    so it needs a *different* same-element atom with the same (t, r) within tol
-    (triangle inequality => necessary, never over-strict)."""
+    (distance from a). A rotation about a keeps every atom's (t, r), and an
+    off-axis atom's C_n orbit has n points spaced at least 2 r sin(pi/n) apart:
+      * if that spacing exceeds tol, the atom cannot map onto itself, so it
+        needs at least one OTHER same-element atom with the same (t, r) within tol;
+      * if it exceeds 2 tol, the n orbit points must land on n DISTINCT atoms,
+        so at least n same-element atoms share that (t, r) within tol."""
     P = np.array([a["p"] for a in atoms], dtype=float)
-    n = len(P)
+    n_at = len(P)
     els = np.array([a["el"] for a in atoms])
     same = (els[:, None] == els[None, :])[:, :, None]
     norm2 = (P * P).sum(axis=1)
     A = _unit_dirs(dirs)
     m = len(A)
     eps = 1e-9
-    thr = tol / (2.0 * math.sin(math.pi / max(n_max, 2))) + eps
-    bad = np.zeros(m, dtype=int)
-    chunk = max(1, int(1.5e6 // max(1, n * n)))
+    bad = np.zeros((m, n_top + 1), dtype=int)
+    chunk = max(1, int(1.5e6 // max(1, n_at * n_at)))
     for c0 in range(0, m, chunk):
         Ac = A[c0:c0 + chunk]
         T = P @ Ac.T                                              # (n, k)
@@ -596,8 +598,12 @@ def _prescreen_rot(atoms, dirs, tol, n_max):
         partner = (same
                    & (np.abs(Rr[None, :, :] - Rr[:, None, :]) <= tol + eps)
                    & (np.abs(T[None, :, :] - T[:, None, :]) <= tol + eps))
-        cnt = partner.sum(axis=1)                                 # (n, k), counts self too
-        bad[c0:c0 + chunk] = ((Rr > thr) & (cnt < 2)).sum(axis=0)
+        cnt = partner.sum(axis=1)                                 # (n, k), counts the atom itself
+        for n in range(2, n_top + 1):
+            sn = math.sin(math.pi / n)
+            need_distinct = Rr > tol / (2.0 * sn) + eps           # cannot map onto itself
+            need_n = Rr > tol / sn + eps                          # orbit points cannot share an atom
+            bad[c0:c0 + chunk, n] = ((need_n & (cnt < n)) | (need_distinct & (cnt < 2))).sum(axis=0)
     return bad
 
 
@@ -675,19 +681,33 @@ def detect_operations(atoms, tol):
 
     use_screen = len(R) > _PRESCREEN_MIN_ATOMS
     if use_screen:
-        rot_axes = [axis_dirs[i] for i in _prescreen_keep(_prescreen_rot(R, axis_dirs, tol, n_max))]
-        # S_n needs the axis to also be a rotation axis (n even: S_n^2 is C_n/2;
-        # n odd: S_n contains C_n), so only rotation-plausible axes need S_n>=3.
-        # S_2 is just the inversion, which does not depend on the axis at all,
-        # so one axis (the first, as before) is enough for it.
-        imp_axes = list(rot_axes)
-        if axis_dirs and not any(a is axis_dirs[0] for a in imp_axes):
-            imp_axes.insert(0, axis_dirs[0])
+        n_top = n_max * 2
+        bad = _prescreen_rot(R, axis_dirs, tol, n_top)
+        ok = bad == 0
+        near = set(np.argsort(bad[:, 2:n_max + 1].min(axis=1), kind="stable")[:_PRESCREEN_KEEP_NEAR].tolist())
+        keep_idx = sorted(set(np.flatnonzero(ok[:, 2:n_top + 1].any(axis=1)).tolist()) | near)
+        rot_plan = [(axis_dirs[i], list(range(2, n_max + 1)) if i in near
+                     else [n for n in range(2, n_max + 1) if ok[i, n]]) for i in keep_idx]
+        # S_n needs the axis to also carry a rotation (n even: S_n^2 is C_n/2;
+        # n odd: S_n contains C_n), so each S_n is only tried where that
+        # rotation could exist. S_2 is just the inversion, which does not
+        # depend on the axis, so the first axis (as before) is enough for it.
+        imp_idx = sorted(set(keep_idx) | ({0} if axis_dirs else set()))
+        imp_plan = []
+        for i in imp_idx:
+            if i in near:
+                ns = list(range(3, n_max * 2 + 1))
+            else:
+                ns = [n for n in range(3, n_max * 2 + 1) if (ok[i, n // 2] if n % 2 == 0 else ok[i, n])]
+            if i == 0:
+                ns = [2] + ns
+            imp_plan.append((axis_dirs[i], ns))
     else:
-        rot_axes = imp_axes = axis_dirs
+        rot_plan = [(a, list(range(2, n_max + 1))) for a in axis_dirs]
+        imp_plan = [(a, list(range(2, n_max * 2 + 1))) for a in axis_dirs]
 
-    for axis in rot_axes:
-        for n in range(2, n_max + 1):
+    for axis, ns in rot_plan:
+        for n in ns:
             M = _rotM(axis, 2 * math.pi / n)
             r = _is_sym(R, M, tol)
             _track(f"C{n}", r["maxd"], M, axis=axis)
@@ -728,8 +748,8 @@ def detect_operations(atoms, tol):
         _track("sigma", r["maxd"], M, normal=normal)
         if r["ok"]:
             _add_op(ops, {"label": "sigma", "kind": "M", "normal": normal, "M": M}, R, tol)
-    for axis in imp_axes:
-        for n in range(2 if (not use_screen or axis is axis_dirs[0]) else 3, n_max * 2 + 1):
+    for axis, ns in imp_plan:
+        for n in ns:
             theta = 2 * math.pi / n
             M = _mul(_reflM(axis), _rotM(axis, theta))
             r = _is_sym(R, M, tol)
