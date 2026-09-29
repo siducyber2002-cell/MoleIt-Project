@@ -15,6 +15,8 @@ import math
 import os
 import re
 
+import numpy as np
+
 TOL_DEFAULT = 0.08
 
 with open(os.path.join(os.path.dirname(__file__), "symmetry_tables.json"), encoding="utf-8") as f:
@@ -159,12 +161,18 @@ def _canonical(a):
 
 def _unique_dirs(arr):
     out = []
+    buf = np.empty((256, 3))
     for a in arr:
         v = _canonical(a)
         if v is None:
             continue
-        if not any(abs(_dot(v, w)) > 0.9995 for w in out):
-            out.append(v)
+        cnt = len(out)
+        if cnt and (np.abs(buf[:cnt] @ np.asarray(v, dtype=float)) > 0.9995).any():
+            continue
+        if cnt == len(buf):
+            buf = np.vstack([buf, np.empty_like(buf)])
+        buf[cnt] = v
+        out.append(v)
     return out
 
 def _jacobi_sym(A):
@@ -339,28 +347,46 @@ def parse_structure(text):
     return {"atoms": norm["atoms"], "center": norm["center"], "scale": norm["scale"], "bonds": list(seen.values())}
 
 # ------------------------------------------------------------ op detection
-def _match(atoms, M, tol):
-    q = [_app(M, a["p"]) for a in atoms]
-    by_el = {}
-    for j, a in enumerate(atoms):
-        by_el.setdefault(a["el"], []).append(j)
-    adj = []
-    for i, a in enumerate(atoms):
-        cand = by_el.get(a["el"], [])
-        # Kuhn's augmenting-path matching only needs SOME candidate list per
-        # atom, not a sorted-by-distance one -- existence of a perfect
-        # matching (all "ok" below actually checks) doesn't depend on
-        # visitation order. The sort here was pure overhead: profiling on a
-        # 40-atom, Ih-symmetry structure (dodecahedrane) showed it (plus the
-        # tuple-building generator behind it) accounting for roughly half of
-        # _match's total cost, since it runs on every one of the several
-        # thousand candidate axis/order combinations tested per molecule,
-        # most of which fail outright. A plain filter is functionally
-        # identical for correctness (verified: identical detected point
-        # group and operation count on both a small D6h test case and the
-        # dodecahedrane Ih case) and meaningfully cheaper.
-        adj.append([j for j in cand if _len(_sub(q[i], atoms[j]["p"])) <= tol])
+_PREP = {"P": None}
 
+
+def _prep(atoms):
+    """Per-structure arrays reused by every _match call: positions, the
+    same-element mask, and the pairwise distance matrix. Rebuilt whenever the
+    coordinates differ from the cached ones, so a different structure (or a
+    mutated one) can never see stale data."""
+    P = np.array([a["p"] for a in atoms], dtype=float).reshape(-1, 3)
+    c = _PREP
+    if c["P"] is None or c["P"].shape != P.shape or not np.array_equal(c["P"], P) \
+            or c["els"] != [a["el"] for a in atoms]:
+        els = [a["el"] for a in atoms]
+        arr = np.array(els)
+        c["P"] = P
+        c["els"] = els
+        c["same"] = arr[:, None] == arr[None, :]
+        c["D0"] = np.sqrt(((P[:, None, :] - P[None, :, :]) ** 2).sum(axis=2))
+    return c["P"], c["same"], c["D0"]
+
+
+def _match(atoms, M, tol):
+    """Does the operation M map the structure onto itself (same elements,
+    within `tol`, and pairwise distances preserved)?  Vectorised with numpy:
+    this is called tens of thousands of times per large molecule, and the
+    original pure-Python version (identical logic, kept in git history) spent
+    ~97% of the total analysis time here."""
+    n = len(atoms)
+    if n == 0:
+        return {"ok": True, "maxd": 0.0}
+    P, same, D0 = _prep(atoms)
+    Q = P @ np.asarray(M, dtype=float).T
+    D = np.sqrt(((Q[:, None, :] - P[None, :, :]) ** 2).sum(axis=2))
+    ok = same & (D <= tol)
+    if not ok.any(axis=1).all():
+        return {"ok": False, "maxd": tol}
+    adj = [np.flatnonzero(row).tolist() for row in ok]
+
+    # Kuhn's augmenting-path matching: existence of a perfect matching does
+    # not depend on visitation order, so plain candidate lists are enough.
     match_j = {}
 
     def dfs(i, seen):
@@ -374,22 +400,15 @@ def _match(atoms, M, tol):
                 return True
         return False
 
-    order = sorted(range(len(atoms)), key=lambda i: len(adj[i]))
+    order = sorted(range(n), key=lambda i: len(adj[i]))
     for i in order:
         if not dfs(i, set()):
             return {"ok": False, "maxd": tol}
-    mp = [None] * len(atoms)
+    mp = np.empty(n, dtype=int)
     for j, i in match_j.items():
         mp[i] = j
-    maxd = 0.0
-    for i in range(len(mp)):
-        maxd = max(maxd, _len(_sub(q[i], atoms[mp[i]]["p"])))
-    pair_err = 0.0
-    for i in range(len(atoms)):
-        for j in range(i + 1, len(atoms)):
-            d0 = _len(_sub(atoms[i]["p"], atoms[j]["p"]))
-            d1 = _len(_sub(atoms[mp[i]]["p"], atoms[mp[j]]["p"]))
-            pair_err = max(pair_err, abs(d0 - d1))
+    maxd = float(D[np.arange(n), mp].max())
+    pair_err = float(np.abs(D0 - D0[np.ix_(mp, mp)]).max())
     if pair_err > max(tol * 1.5, 0.01):
         return {"ok": False, "maxd": max(maxd, pair_err)}
     return {"ok": True, "maxd": maxd}
