@@ -50,10 +50,15 @@ RDLogger.DisableLog("rdApp.*")
 # ---------------------------------------------------------------- limits
 MAX_ATOMS_RDKIT = 150        # organic path
 MAX_ATOMS_XTB = 70           # xTB path (cost grows quickly with size)
-RDKIT_BUDGET_S = 15.0        # hard cap for the RDKit stage of a "heavy" molecule
-GENERATION_TOTAL_S = 40.0    # whole pipeline; must stay below the router's 45 s cap
+RDKIT_LIGHT_BUDGET_S = 30.0  # RDKit stage, small molecule (in-process)
+RDKIT_HEAVY_BUDGET_S = 32.0  # RDKit stage, heavy molecule (killable child). MMFF-capable
+                             # molecules have no cheap fallback, so this gets most of the time.
+GENERATION_TOTAL_S = 40.0    # whole pipeline; the frontend gives up at 45 s in total
 XTB_BUDGET_S = 30.0          # max for all xTB starts together (shrinks if RDKit used time)
-SPAWN_SLACK_S = 5.0          # child-process start-up allowance
+# Child-process start-up allowance. "fork" reuses the already-imported RDKit/numpy
+# (near-instant); "spawn" must re-import everything, which is slow on a small CPU.
+_CHILD_START_METHOD = "fork" if "fork" in multiprocessing.get_all_start_methods() else "spawn"
+SPAWN_SLACK_S = 2.0 if _CHILD_START_METHOD == "fork" else 6.0
 HEAVY_ATOMS = 24             # heavy atoms above this -> run risky stages in a killable child
 HEAVY_RINGS = 3              # ring count above this  -> same (cages / fused polycycles)
 XTB_STARTS = 4               # random starting geometries tried
@@ -128,7 +133,8 @@ def _is_heavy(mol: Chem.Mol) -> bool:
     return mol.GetNumHeavyAtoms() > HEAVY_ATOMS or n_rings > HEAVY_RINGS
 
 
-def _embed(mol: Chem.Mol, n_confs: int, seed: int, random_coords: bool, plain_dg: bool = False) -> list[int]:
+def _embed(mol: Chem.Mol, n_confs: int, seed: int, random_coords: bool, plain_dg: bool = False,
+           max_iter: int = 200) -> list[int]:
     params = AllChem.ETKDGv3()
     params.randomSeed = seed
     params.useRandomCoords = random_coords
@@ -138,47 +144,98 @@ def _embed(mol: Chem.Mol, n_confs: int, seed: int, random_coords: bool, plain_dg
         params.useExpTorsionAnglePrefs = False
         params.useBasicKnowledge = False
     params.numThreads = 1
-    params.maxIterations = 200
+    params.maxIterations = max_iter
     return list(AllChem.EmbedMultipleConfs(mol, n_confs, params))
 
 
-def _rdkit_build(mol: Chem.Mol) -> Generated:
+def _embed_bounded(mol: Chem.Mol, n_confs: int, seed: int, random_coords: bool, plain_dg: bool,
+                   deadline: float) -> list[int]:
+    """Embedding as many SHORT calls (a few attempts each) instead of one long,
+    uninterruptible one: distance-geometry is a randomised search, so restarting
+    with fresh seeds is as good as one long run, and the clock is checked
+    between calls."""
+    k = 0
+    while time.monotonic() < deadline:
+        ids = _embed(mol, n_confs, seed + 7919 * k, random_coords, plain_dg, max_iter=8)
+        if ids:
+            return ids
+        k += 1
+    return []
+
+
+def _mmff_relax(work: Chem.Mol, ids: list[int], deadline: float) -> tuple[list[int], list[float]]:
+    """MMFF-minimise each conformer in short chunks, stopping at the deadline.
+    Returns the conformer ids that were processed and their energies."""
+    props = AllChem.MMFFGetMoleculeProperties(work)
+    if props is None:
+        raise GenerationError("No force-field parameters for this molecule.")
+    done, energies = [], []
+    for cid in ids:
+        if done and time.monotonic() > deadline:
+            break
+        ff = AllChem.MMFFGetMoleculeForceField(work, props, confId=cid)
+        if ff is None:
+            continue
+        ff.Initialize()
+        for _ in range(16):  # up to 16 x 500 = 8000 iterations, clock checked per chunk
+            if ff.Minimize(maxIts=500) == 0 or time.monotonic() > deadline:
+                break
+        done.append(cid)
+        energies.append(float(ff.CalcEnergy()))
+    return done, energies
+
+
+def _rdkit_build(mol: Chem.Mol, budget: float = RDKIT_LIGHT_BUDGET_S) -> Generated:
+    started = time.monotonic()
+    deadline = started + budget
     if mol.GetNumAtoms() > MAX_ATOMS_RDKIT:
         raise GenerationError(f"Too large to build a 3-D structure automatically ({mol.GetNumAtoms()} atoms).")
     if not AllChem.MMFFHasAllMoleculeParams(mol):
         raise GenerationError("No force-field parameters for this molecule.")
 
+    heavy = _is_heavy(mol)
     n_rot = rdMolDescriptors.CalcNumRotatableBonds(mol)
     n_confs = 1 if n_rot == 0 else min(30, 6 + 4 * n_rot)
+    if heavy:
+        n_confs = min(n_confs, 8)  # bound the cost for big molecules
 
     work = Chem.Mol(mol)
     # (random_coords, plain_dg) strategies, in order. Ring-rich molecules do
     # much better starting from random coordinates than from ETKDG's default
     # eigenvalue embedding, so they try that first.
-    if _is_heavy(mol):
-        strategies = [(True, False), (True, True), (False, False)]
-    else:
-        strategies = [(False, False), (True, False), (True, True)]
     ids: list[int] = []
-    for random_coords, plain_dg in strategies:
-        ids = _embed(work, n_confs, RANDOM_SEED, random_coords, plain_dg)
-        if ids:
-            break
+    if heavy:
+        strategies = [(True, False), (True, True), (False, False)]
+        embed_deadline = started + 0.75 * budget  # keep the rest for MMFF
+        for random_coords, plain_dg in strategies:
+            now = time.monotonic()
+            slice_end = now + 0.6 * max(0.0, embed_deadline - now) if (random_coords, plain_dg) != strategies[-1] else embed_deadline
+            ids = _embed_bounded(work, n_confs, RANDOM_SEED, random_coords, plain_dg, slice_end)
+            if ids:
+                break
+        logger.info("structure_builder: heavy embed %s in %.1fs | atoms=%d", "ok" if ids else "failed",
+                    time.monotonic() - started, mol.GetNumAtoms())
+    else:
+        for random_coords, plain_dg in [(False, False), (True, False), (True, True)]:
+            ids = _embed(work, n_confs, RANDOM_SEED, random_coords, plain_dg)
+            if ids:
+                break
     if not ids:
         raise GenerationError("Could not embed this molecule in 3-D.")
 
     # relax every conformer, keep the lowest-energy one
-    res = AllChem.MMFFOptimizeMoleculeConfs(work, maxIters=4000, numThreads=1)
-    energies = [e if (not math.isnan(e)) else float("inf") for _, e in res]
-    best = int(np.argmin(energies))
-    if not math.isfinite(energies[best]):
+    done, energies = _mmff_relax(work, list(ids), deadline)
+    energies = [e if (not math.isnan(e)) else float("inf") for e in energies]
+    if not energies or not math.isfinite(min(energies)):
         raise GenerationError("Force-field optimisation failed for this molecule.")
-    conf_id = ids[best]
+    best = int(np.argmin(energies))
+    conf_id = done[best]
+    logger.info("structure_builder: MMFF done in %.1fs | confs=%d", time.monotonic() - started, len(done))
 
     block = Chem.MolToMolBlock(work, confId=conf_id)
     note = "3-D geometry generated for this compound (RDKit ETKDG + MMFF94)."
     if n_rot > 0:
-        note += (f" It is flexible ({n_rot} rotatable bonds): this is the lowest-energy of {len(ids)} "
+        note += (f" It is flexible ({n_rot} rotatable bonds): this is the lowest-energy of {len(done)} "
                  "conformers, and other conformers can have a different point group.")
     return Generated(text=block, fmt="sdf", method="rdkit", note=note)
 
@@ -556,7 +613,7 @@ def _stage_worker(conn, stage: str, sdf_text: str, budget: float) -> None:
     """Child-process entry point (must be module-level so 'spawn' can import it)."""
     try:
         mol = _mol_from_sdf(sdf_text)
-        gen = _rdkit_build(mol) if stage == "rdkit" else _xtb_build(mol, budget)
+        gen = _rdkit_build(mol, budget) if stage == "rdkit" else _xtb_build(mol, budget)
         conn.send(("ok", (gen.text, gen.fmt, gen.method, gen.note)))
     except GenerationError as exc:
         conn.send(("gen", str(exc)))
@@ -568,7 +625,7 @@ def _stage_worker(conn, stage: str, sdf_text: str, budget: float) -> None:
 
 def _run_stage(stage: str, sdf_text: str, budget: float, hard_timeout: float) -> Generated:
     """Run one stage in a child process and kill it if it overruns."""
-    ctx = multiprocessing.get_context("spawn")
+    ctx = multiprocessing.get_context(_CHILD_START_METHOD)
     recv, send = ctx.Pipe(duplex=False)
     proc = ctx.Process(target=_stage_worker, args=(send, stage, sdf_text, budget), daemon=True)
     proc.start()
@@ -607,9 +664,9 @@ def _generate_cached(digest: str, sdf_text: str) -> Generated:  # digest is just
     if reason is None:
         try:
             if heavy:
-                gen = _run_stage("rdkit", sdf_text, 0.0, RDKIT_BUDGET_S + SPAWN_SLACK_S)
+                gen = _run_stage("rdkit", sdf_text, RDKIT_HEAVY_BUDGET_S, RDKIT_HEAVY_BUDGET_S + SPAWN_SLACK_S)
             else:
-                gen = _rdkit_build(mol)
+                gen = _rdkit_build(mol, RDKIT_LIGHT_BUDGET_S)
             logger.info("structure_builder: RDKit succeeded | atoms=%d", mol.GetNumAtoms())
             return gen
         except GenerationError as exc:
