@@ -254,13 +254,26 @@ def _embed_fragment(frag: Chem.Mol, seed: int) -> np.ndarray | None:
     if frag.GetNumAtoms() == 1:
         return np.zeros((1, 3))
     work = Chem.Mol(frag)
+    # Fragments come from GetMolFrags(sanitizeFrags=False), so ring info and
+    # implicit valences are not initialised yet. Do it here or RDKit raises
+    # "RingInfo not initialized" on the MMFF checks below.
+    try:
+        work.UpdatePropertyCache(strict=False)
+        Chem.FastFindRings(work)
+    except Exception:
+        pass
     params = AllChem.ETKDGv3()
     params.randomSeed = seed
     params.useRandomCoords = True
     params.numThreads = 1
     if AllChem.EmbedMolecule(work, params) != 0:
         return None
-    AllChem.MMFFOptimizeMolecule(work, maxIters=2000) if AllChem.MMFFHasAllMoleculeParams(work) else None
+    # MMFF polish is optional: if it can't run, keep the raw ETKDG geometry.
+    try:
+        if AllChem.MMFFHasAllMoleculeParams(work):
+            AllChem.MMFFOptimizeMolecule(work, maxIters=2000)
+    except Exception:
+        pass
     pos = np.array(work.GetConformer().GetPositions())
     return pos - pos.mean(axis=0)
 
