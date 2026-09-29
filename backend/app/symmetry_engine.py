@@ -553,6 +553,87 @@ def _plane_candidates(atoms, axes, all_dirs=None):
             ns.append(_cross(axes[i], axes[j]))
     return _unique_dirs(ns)
 
+# Structures at or below this many atoms skip the pre-screen below: they are
+# already instant, and this keeps their full "closest miss" diagnostics.
+_PRESCREEN_MIN_ATOMS = 20
+# Even when a candidate direction fails the pre-screen, this many of the
+# least-bad ones are still tested, so the "closest candidate missed by X A"
+# diagnostics have something honest to report for every operation type.
+_PRESCREEN_KEEP_NEAR = 24
+
+
+def _unit_dirs(dirs):
+    A = np.asarray(dirs, dtype=float).reshape(-1, 3)
+    lens = np.linalg.norm(A, axis=1)
+    lens[lens < 1e-12] = 1.0
+    return A / lens[:, None]
+
+
+def _prescreen_rot(atoms, dirs, tol, n_max):
+    """Per-direction count of atoms that make a proper rotation about that
+    direction impossible (0 = cannot be ruled out). EXACT necessary condition.
+
+    For a unit direction a let t = p.a (height along a) and r = |p - t a|
+    (distance from a). A rotation about a keeps every atom's (t, r). Any atom
+    further than tol / (2 sin(pi/n_max)) from the axis cannot map onto itself,
+    so it needs a *different* same-element atom with the same (t, r) within tol
+    (triangle inequality => necessary, never over-strict)."""
+    P = np.array([a["p"] for a in atoms], dtype=float)
+    n = len(P)
+    els = np.array([a["el"] for a in atoms])
+    same = (els[:, None] == els[None, :])[:, :, None]
+    norm2 = (P * P).sum(axis=1)
+    A = _unit_dirs(dirs)
+    m = len(A)
+    eps = 1e-9
+    thr = tol / (2.0 * math.sin(math.pi / max(n_max, 2))) + eps
+    bad = np.zeros(m, dtype=int)
+    chunk = max(1, int(1.5e6 // max(1, n * n)))
+    for c0 in range(0, m, chunk):
+        Ac = A[c0:c0 + chunk]
+        T = P @ Ac.T                                              # (n, k)
+        Rr = np.sqrt(np.maximum(norm2[:, None] - T * T, 0.0))     # (n, k)
+        partner = (same
+                   & (np.abs(Rr[None, :, :] - Rr[:, None, :]) <= tol + eps)
+                   & (np.abs(T[None, :, :] - T[:, None, :]) <= tol + eps))
+        cnt = partner.sum(axis=1)                                 # (n, k), counts self too
+        bad[c0:c0 + chunk] = ((Rr > thr) & (cnt < 2)).sum(axis=0)
+    return bad
+
+
+def _prescreen_refl(atoms, dirs, tol):
+    """Per-direction count of atoms whose mirror image (reflection through the
+    plane normal to that direction) lands on no same-element atom within tol.
+    0 = cannot be ruled out. EXACT necessary condition for a mirror plane."""
+    P = np.array([a["p"] for a in atoms], dtype=float)
+    n = len(P)
+    els = np.array([a["el"] for a in atoms])
+    same = (els[:, None] == els[None, :])[:, :, None]
+    pn2 = (P * P).sum(axis=1)
+    A = _unit_dirs(dirs)
+    m = len(A)
+    lim = (tol + 1e-9) ** 2
+    bad = np.zeros(m, dtype=int)
+    chunk = max(1, int(1.5e6 // max(1, n * n)))
+    for c0 in range(0, m, chunk):
+        Ac = A[c0:c0 + chunk]
+        T = P @ Ac.T                                              # (n, k)
+        Q = P[:, None, :] - 2.0 * T[:, :, None] * Ac[None, :, :]  # (n, k, 3) mirror images
+        qn2 = (Q * Q).sum(axis=2)                                 # (n, k)
+        cross = np.einsum("ikc,jc->ijk", Q, P)                    # (n, n, k)
+        d2 = qn2[:, None, :] + pn2[None, :, None] - 2.0 * cross
+        has_image = (same & (d2 <= lim)).any(axis=1)              # (n, k)
+        bad[c0:c0 + chunk] = (~has_image).sum(axis=0)
+    return bad
+
+
+def _prescreen_keep(bad):
+    """Indices to test in full: everything not ruled out, plus the nearest misses."""
+    keep = set(np.flatnonzero(bad == 0).tolist())
+    keep.update(np.argsort(bad, kind="stable")[:_PRESCREEN_KEEP_NEAR].tolist())
+    return sorted(keep)
+
+
 def detect_operations(atoms, tol):
     ops = {}
     _add_op(ops, {"label": "E", "kind": "E", "M": I3}, atoms, tol)
@@ -592,7 +673,20 @@ def detect_operations(atoms, tol):
         if cur is None or maxd < cur["maxd"]:
             best_miss[key] = dict(maxd=maxd, M=M, **extra)
 
-    for axis in axis_dirs:
+    use_screen = len(R) > _PRESCREEN_MIN_ATOMS
+    if use_screen:
+        rot_axes = [axis_dirs[i] for i in _prescreen_keep(_prescreen_rot(R, axis_dirs, tol, n_max))]
+        # S_n needs the axis to also be a rotation axis (n even: S_n^2 is C_n/2;
+        # n odd: S_n contains C_n), so only rotation-plausible axes need S_n>=3.
+        # S_2 is just the inversion, which does not depend on the axis at all,
+        # so one axis (the first, as before) is enough for it.
+        imp_axes = list(rot_axes)
+        if axis_dirs and not any(a is axis_dirs[0] for a in imp_axes):
+            imp_axes.insert(0, axis_dirs[0])
+    else:
+        rot_axes = imp_axes = axis_dirs
+
+    for axis in rot_axes:
         for n in range(2, n_max + 1):
             M = _rotM(axis, 2 * math.pi / n)
             r = _is_sym(R, M, tol)
@@ -626,14 +720,16 @@ def detect_operations(atoms, tol):
     # is fixing. An empty axis list here just means "skip the axis-pair
     # cross-product enhancement"; all_dirs still covers the base case.
     planes = _plane_candidates(R, confirmed_axes, all_dirs=axis_dirs)
+    if use_screen:
+        planes = [planes[i] for i in _prescreen_keep(_prescreen_refl(R, planes, tol))]
     for normal in planes:
         M = _reflM(normal)
         r = _is_sym(R, M, tol)
         _track("sigma", r["maxd"], M, normal=normal)
         if r["ok"]:
             _add_op(ops, {"label": "sigma", "kind": "M", "normal": normal, "M": M}, R, tol)
-    for axis in axis_dirs:
-        for n in range(2, n_max * 2 + 1):
+    for axis in imp_axes:
+        for n in range(2 if (not use_screen or axis is axis_dirs[0]) else 3, n_max * 2 + 1):
             theta = 2 * math.pi / n
             M = _mul(_reflM(axis), _rotM(axis, theta))
             r = _is_sym(R, M, tol)
