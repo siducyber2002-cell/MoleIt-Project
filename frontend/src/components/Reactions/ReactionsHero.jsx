@@ -14,6 +14,20 @@
 // but nothing about it looks like a distinct block. Tapping a tile
 // hands the reaction up to the parent, which opens ReactionDetailModal
 // as a popup.
+//
+// SCREEN-FIT FIXES
+//  - The tile columns and the fixed section height only kick in from `lg`
+//    up. Between `sm` and `lg` the grid is a single column, so the old
+//    `sm:h-full` on both children split the fixed height between the text
+//    and the (hidden-behind-it) columns and left the headline crushed and
+//    pushed off-screen.
+//  - Headline size is fluid (clamp on vw) so "Every mechanism," fits on
+//    one line at any width instead of wrapping to three lines and
+//    dropping the flask below the text.
+//  - The flask is glued to the end of the last headline line (nowrap), so
+//    it can't wrap onto its own row.
+//  - The text block sits higher: less top padding on small screens, and
+//    the upward nudge is only applied where the columns sit beside it.
 
 import { useMemo, useState } from 'react';
 import { motion, useAnimationControls } from 'framer-motion';
@@ -97,11 +111,11 @@ function FlaskBubbles() {
       type="button"
       onClick={handleClick}
       aria-label="Fizz the flask"
-      className="relative ml-2 inline-flex h-8 w-8 shrink-0 -translate-y-1 cursor-pointer align-middle sm:ml-4 sm:h-14 sm:w-14 sm:-translate-y-2"
+      className="relative ml-2 inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center sm:ml-4 sm:h-12 sm:w-12 lg:h-14 lg:w-14"
     >
       <motion.div
         animate={controls}
-        className="relative flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-fuchsia-400 shadow-lg shadow-fuchsia-900/50 ring-4 ring-lab-950/60 sm:h-14 sm:w-14"
+        className="relative flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-fuchsia-400 shadow-lg shadow-fuchsia-900/50 ring-4 ring-lab-950/60 sm:h-12 sm:w-12 lg:h-14 lg:w-14"
       >
         <FlaskConical size={16} className="text-white sm:hidden" />
         <FlaskConical size={22} className="hidden text-white sm:block" />
@@ -140,8 +154,8 @@ export default function ReactionsHero({ reactions = [], onSelect, loading }) {
   }, [reactions]);
 
   return (
-    <section className="relative w-full sm:h-[min(88vh,760px)] sm:min-h-[560px]">
-      <div className="relative z-10 grid grid-cols-1 sm:h-full lg:grid-cols-2">
+    <section className="relative w-full lg:h-[min(84dvh,720px)] lg:min-h-[520px]">
+      <div className="relative z-10 grid grid-cols-1 lg:h-full lg:grid-cols-2">
         {/* Left: headline. On sm+ (where the section has a fixed height and
             the counter-scrolling tile columns sit alongside it) this is
             shifted up a bit within its centered flex box via translate —
@@ -151,30 +165,32 @@ export default function ReactionsHero({ reactions = [], onSelect, loading }) {
             below sm anyway), so this just flows naturally top-to-bottom
             with its own compact padding instead of sitting centered in a
             tall, mostly-empty box. */}
-        <div className="flex flex-col justify-center px-5 py-7 sm:-translate-y-10 sm:px-10 sm:py-10">
+        <div className="flex flex-col justify-center px-5 pb-6 pt-2 sm:px-10 sm:pb-8 sm:pt-4 lg:-translate-y-8 lg:py-10">
           <span className="inline-flex w-fit items-center gap-2 rounded-full border border-purple-500/30 bg-lab-900/60 px-4 py-1.5 text-xs font-semibold uppercase tracking-wide text-purple-300 sm:text-sm">
             <span className="h-2 w-2 rounded-full bg-purple-400" /> Reaction Library
           </span>
 
-          <div className="mt-4 w-fit max-w-2xl sm:mt-5">
-            <h1 className="font-display text-4xl font-bold leading-[1.05] tracking-tight sm:text-7xl sm:leading-[1.02] lg:text-8xl">
+          <div className="mt-3 w-fit max-w-full sm:mt-4">
+            <h1 className="font-display text-[clamp(2rem,9vw,5rem)] font-bold leading-[1.05] tracking-tight lg:text-[clamp(3rem,6.4vw,6rem)] lg:leading-[1.02]">
               <GlitchText
                 as="span"
                 className="bg-gradient-to-r from-fuchsia-400 to-purple-300 bg-clip-text text-transparent"
                 text="Every mechanism,"
               />
               <br />
-              <GlitchText
-                as="span"
-                className="bg-gradient-to-r from-violet-300 to-fuchsia-200 bg-clip-text text-transparent"
-                text="on demand."
-                delayMs={180}
-              />
-              <FlaskBubbles />
+              <span className="inline-flex items-center whitespace-nowrap">
+                <GlitchText
+                  as="span"
+                  className="bg-gradient-to-r from-violet-300 to-fuchsia-200 bg-clip-text text-transparent"
+                  text="on demand."
+                  delayMs={180}
+                />
+                <FlaskBubbles />
+              </span>
             </h1>
           </div>
 
-          <p className="mt-4 max-w-md text-sm leading-relaxed text-lab-400 sm:mt-6 sm:text-base lg:text-lg">
+          <p className="mt-3 max-w-md text-sm leading-relaxed text-lab-400 sm:mt-5 sm:text-base lg:text-lg">
             Named reactions, electron-pushing arrows, and step-by-step mechanisms — tap any card
             to open it, or scroll down to search the full library.
           </p>
@@ -184,7 +200,7 @@ export default function ReactionsHero({ reactions = [], onSelect, loading }) {
             this inner strip clips overflow (so the endless scrolling
             track can't grow the page) — no border/background box
             around it, so it reads as part of the page, not a card. */}
-        <div className="hidden h-full gap-3 overflow-hidden p-4 sm:flex">
+        <div className="hidden h-full gap-3 overflow-hidden p-4 lg:flex">
           {colA.length === 0 ? (
             <div className="flex flex-1 items-center justify-center">
               <span className="hero-loading-pulse block h-2.5 w-2.5 rounded-full bg-purple-400" />
