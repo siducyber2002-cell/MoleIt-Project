@@ -508,6 +508,12 @@ export default function GroupTheoryPage() {
                   </button>
                 </div>
 
+                {preview.structureNote && (
+                  <div className="mt-3 flex items-start gap-2 rounded-lg border-2 border-[var(--gt-teal)]/40 p-2.5 text-[11px]" style={{ background: '#e9f6f4' }}>
+                    <Info size={14} className="mt-0.5 shrink-0 text-[var(--gt-teal)]" />
+                    <span className="text-[#1c5c54]">{preview.structureNote}</span>
+                  </div>
+                )}
                 {preview.structureWarning && (
                   <div className="mt-3 flex items-start gap-2 rounded-lg border-2 border-[var(--gt-orange)]/50 p-2.5 text-[11px]" style={{ background: '#fdf1de' }}>
                     <AlertTriangle size={14} className="mt-0.5 shrink-0 text-[var(--gt-orange)]" />

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from .. import symmetry_engine as engine
 from .. import symmetry_report as report_builder
+from .. import structure_builder
 from ..exceptions import BadRequestError, UpstreamServiceError, UpstreamUnavailableError
 from ..logging_config import get_logger
 from ..net import DeadlineExceeded, run_with_deadline
@@ -140,12 +141,7 @@ def _run_analysis(structure_text: str, tolerance: float | None):
 @router.get("/demos")
 def list_demos():
     logger.info("List symmetry demos requested")
-    try:
-        logger.info("List symmetry demos succeeded | count=%d", len(engine.DEMOS))
-        return ok(200, "Demo structures fetched successfully", demos=engine.DEMOS)
-    except Exception:
-        logger.error("List symmetry demos crashed", exc_info=True)
-        return err(500, "Internal server error")
+    return ok(200, "Demo structures fetched successfully", demos=engine.DEMOS)
 
 
 @router.post("/analyze")
@@ -227,6 +223,7 @@ def fetch_pubchem_structure(payload: PubchemRequest):
         cid, sdf, quality = run_with_deadline(
             _resolve_and_fetch, query, cid_hint, timeout=_PUBCHEM_DEADLINE_SECONDS
         )
+        sdf, quality, note, warning = _maybe_generate_3d(sdf, quality)
         parsed = engine.parse_structure(sdf)
         formula = {}
         for a in parsed["atoms"]:
@@ -242,13 +239,10 @@ def fetch_pubchem_structure(payload: PubchemRequest):
             "atoms": [{"el": a["el"], "x": a["p"][0], "y": a["p"][1], "z": a["p"][2]} for a in parsed["atoms"]],
             "bonds": [[b[0], b[1]] for b in parsed["bonds"]],
         }
-        if quality == "2d-fallback":
-            preview["structureWarning"] = (
-                "PubChem has no 3-D conformer on file for this compound — this is its "
-                "flattened 2-D depiction (all atoms at z=0). Calculating the point group "
-                "from this will over-report symmetry. Paste a real 3-D structure "
-                "(XYZ/SDF/PDB) for a trustworthy result."
-            )
+        if note:
+            preview["structureNote"] = note
+        if warning:
+            preview["structureWarning"] = warning
         logger.info(
             "Symmetry PubChem structure-only fetch succeeded | cid=%s quality=%s atoms=%d",
             cid, quality, preview["atomCount"],
@@ -308,19 +302,16 @@ def analyze_from_pubchem(payload: PubchemRequest):
         cid, sdf, quality = run_with_deadline(
             _resolve_and_fetch, query, cid_hint, timeout=_PUBCHEM_DEADLINE_SECONDS
         )
+        sdf, quality, note, warning = _maybe_generate_3d(sdf, quality)
         result = _run_analysis(sdf, payload.tolerance)
         result["pubchemCid"] = cid
         result["pubchemUrl"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
         result["sourceStructure"] = sdf
         result["structureQuality"] = quality
-        if quality == "2d-fallback":
-            result["structureWarning"] = (
-                "PubChem has no 3-D conformer on file for this compound — this "
-                "analysis is of PubChem's flattened 2-D depiction (all atoms at "
-                "z=0), so the detected point group will over-report symmetry "
-                "(e.g. any real tetrahedral center will look artificially planar). "
-                "Paste a real 3-D structure (XYZ/SDF/PDB) for a trustworthy result."
-            )
+        if note:
+            result["structureNote"] = note
+        if warning:
+            result["structureWarning"] = warning
         logger.info(
             "Symmetry PubChem fetch succeeded | cid=%s group=%s quality=%s",
             cid, result["group"], quality,
@@ -345,6 +336,52 @@ def analyze_from_pubchem(payload: PubchemRequest):
 
 # Hard wall-clock cap for the whole resolve-name-to-CID + fetch-SDF chain.
 _PUBCHEM_DEADLINE_SECONDS = 45
+
+# Separate budget for 3-D generation (RDKit/xTB), applied only when PubChem's
+# own fetch came back 2-D-only. Kept apart from _PUBCHEM_DEADLINE_SECONDS
+# above so a slow-but-working PubChem round trip can never eat into the time
+# generation gets, and vice versa -- these are two independent stages with
+# two independent failure modes.
+_GENERATION_DEADLINE_SECONDS = 45
+
+
+def _maybe_generate_3d(sdf: str, quality: str) -> tuple[str, str, str | None, str | None]:
+    """When PubChem only has a flattened 2-D depiction (quality ==
+    "2d-fallback"), tries to build a real 3-D structure instead -- RDKit's
+    distance geometry + MMFF94 for ordinary organic molecules, GFN2-xTB for
+    anything with a metal, a hypervalent centre or more than one fragment
+    (structure_builder.py has the detailed reasoning for each).
+
+    Returns (sdf, quality, note, warning):
+      - generation succeeds  -> the generated text, quality
+        "generated-3d-rdkit"/"generated-3d-xtb", an informational `note`
+        for the UI, warning=None.
+      - not attempted, or attempted and failed -> the original sdf/quality
+        unchanged, note=None, and the existing "this is a flattened 2-D
+        depiction" warning -- exactly today's behaviour, so a generation
+        failure never makes this endpoint worse than before it existed.
+    """
+    if quality != "2d-fallback":
+        return sdf, quality, None, None
+    warning = (
+        "PubChem has no 3-D conformer on file for this compound, and an automatic 3-D structure "
+        "could not be generated for it either -- this is its flattened 2-D depiction (all atoms at "
+        "z=0), so the detected point group will over-report symmetry. Paste a real 3-D structure "
+        "(XYZ/SDF/PDB) for a trustworthy result."
+    )
+    try:
+        gen = run_with_deadline(structure_builder.generate_3d, sdf, timeout=_GENERATION_DEADLINE_SECONDS)
+        logger.info("Symmetry PubChem 3-D generation succeeded | method=%s", gen.method)
+        return gen.text, f"generated-3d-{gen.method}", gen.note, None
+    except structure_builder.GenerationError as e:
+        logger.info("Symmetry PubChem 3-D generation declined | reason=%s", e)
+        return sdf, quality, None, f"{warning} ({e})"
+    except DeadlineExceeded:
+        logger.warning("Symmetry PubChem 3-D generation timed out")
+        return sdf, quality, None, warning
+    except Exception:
+        logger.error("Symmetry PubChem 3-D generation crashed", exc_info=True)
+        return sdf, quality, None, warning
 
 
 def _resolve_and_fetch(query: str, cid_hint: str | None) -> tuple[str, str, str]:
