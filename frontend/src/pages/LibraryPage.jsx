@@ -26,6 +26,7 @@ export default function LibraryPage() {
   // PubChem lookup state: status is 'idle' | 'loading' | 'error'.
   const [pubchem, setPubchem] = useState({ status: 'idle', query: '', error: null });
   const [fetchedName, setFetchedName] = useState(null); // shown in the "saved to your library" note
+  const [fetchedMatch, setFetchedMatch] = useState(null); // {type:'closest',query} when PubChem only had a near match
   const fetchToken = useRef(0); // lets a newer search cancel an older in-flight lookup
   const failedQueries = useRef(new Set()); // don't hammer PubChem with a query that already failed
 
@@ -58,6 +59,7 @@ export default function LibraryPage() {
     fetchToken.current += 1;
     setPubchem({ status: 'idle', query: '', error: null });
     setFetchedName(null);
+    setFetchedMatch(null);
     const t = setTimeout(load, 200);
     return () => clearTimeout(t);
   }, [load]);
@@ -71,12 +73,16 @@ export default function LibraryPage() {
     failedQueries.current.delete(q.toLowerCase());
     setPubchem({ status: 'loading', query: q, error: null });
     fetchExternalCompound(q)
-      .then((compound) => {
+      .then(({ compound, match }) => {
         if (token !== fetchToken.current) return; // the user has searched for something else since
         // The backend has already saved it to the library; show it right here,
         // and refresh the category list + hero cards in case it added anything new.
         setCompounds([compound]);
         setFetchedName(compound.name);
+        // match.type === 'closest' means PubChem had no exact hit for what was
+        // typed (a typo / partial name) and this is its nearest real compound --
+        // say so plainly rather than implying an exact match was found.
+        setFetchedMatch(match && match.type === 'closest' ? match : null);
         setPubchem({ status: 'idle', query: '', error: null });
         fetchCompoundCategories().then((cats) => setCategories(['All', ...cats]));
         fetchCompounds({}).then(setSpotlight);
@@ -162,14 +168,23 @@ export default function LibraryPage() {
             </div>
           ) : compounds.length > 0 ? (
             <>
-              {fetchedName && (
+              {fetchedName && fetchedMatch ? (
+                <p className="lib-fetched lib-fetched--approx" role="status">
+                  <AlertCircle size={16} strokeWidth={2.4} />
+                  <span>
+                    No exact match for <strong>“{fetchedMatch.query}”</strong> — showing closest match:{' '}
+                    <strong>{fetchedName}</strong>. Not what you meant? Remove it from the library and try a
+                    different spelling.
+                  </span>
+                </p>
+              ) : fetchedName ? (
                 <p className="lib-fetched" role="status">
                   <CheckCircle2 size={16} strokeWidth={2.4} />
                   <span>
                     Fetched <strong>{fetchedName}</strong> from PubChem and saved it to your library.
                   </span>
                 </p>
-              )}
+              ) : null}
               <div className="lib-grid">
                 {compounds.map((c) => (
                   <CompoundCard key={c.id} compound={c} />

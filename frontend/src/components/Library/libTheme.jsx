@@ -115,6 +115,31 @@ html.lib-light .ix-burger--dark:not(.is-open):active { transform: translateY(3px
 .lib-btn:disabled { opacity: 0.65; cursor: progress; transform: none; }
 
 .lib-spin { animation: lib-spin 0.9s linear infinite; }
+
+/* "Fetched from PubChem" notice above the result card.
+   Default (exact match): calm lime/ink, same family as .lib-btn--lime.
+   --approx (a typo/partial name only got PubChem's *closest* compound, not
+   an exact hit): amber, so it reads as a flag rather than a confirmation. */
+.lib-fetched {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin: 0 0 1rem;
+  padding: 0.7rem 0.95rem;
+  border-radius: 0.85rem;
+  border: 1.5px solid var(--lib-ink);
+  background: rgba(204, 235, 45, 0.35);
+  color: var(--lib-ink);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.lib-fetched svg { flex: none; margin-top: 0.15rem; }
+.lib-fetched--approx {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: #b45309;
+  color: #7c3d06;
+}
+.lib-fetched--approx svg { color: #b45309; }
 @keyframes lib-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .lib-spin { animation: none; } }
 `;

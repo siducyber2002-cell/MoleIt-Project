@@ -57,6 +57,16 @@ def list_categories(db: Session = Depends(get_db)):
         return err(500, "Internal server error")
 
 
+def _fetch_ok(compound_row, match: Optional[dict], query: str):
+    """200 for /fetch. When PubChem only matched a corrected/partial name, say
+    so plainly (message + `match`) instead of pretending it was an exact hit."""
+    if match and match.get("type") == "closest":
+        message = f"No exact match for \u201c{query}\u201d \u2014 showing closest match: {compound_row.name}"
+    else:
+        message = "Compound fetched successfully"
+    return ok(200, message, compound=serialize(schemas.CompoundOut, compound_row), match=match)
+
+
 @router.post("/fetch")
 def fetch_external_compound(payload: schemas.CompoundFetchRequest, db: Session = Depends(get_db)):
     """Look up a compound by free-text name. Checks the local library first
@@ -82,6 +92,7 @@ def fetch_external_compound(payload: schemas.CompoundFetchRequest, db: Session =
         try:
             logger.info("Compound not in local library, calling PubChem | query=%r", query)
             record = pubchem.build_compound_record(query)
+            match = record.pop("_match", None)  # {"type": "exact"|"closest", "query": ...}
         except pubchem.PubChemNotFoundError:
             raise NotFoundError(f"PubChem has no record matching \u201c{query}\u201d. Check the spelling, or try the formula.")
         except pubchem.PubChemServiceError as exc:
@@ -106,14 +117,17 @@ def fetch_external_compound(payload: schemas.CompoundFetchRequest, db: Session =
                     "Fetch external compound resolved to already-cached CID | query=%r cid=%s",
                     query, record["pubchem_cid"],
                 )
-                return ok(200, "Compound fetched successfully", compound=serialize(schemas.CompoundOut, by_cid))
+                return _fetch_ok(by_cid, match, query)
 
         row = models.Compound(**record)
         db.add(row)
         db.commit()
         db.refresh(row)
-        logger.info("Fetch external compound succeeded, cached new compound | query=%r id=%s", query, row.id)
-        return ok(200, "Compound fetched successfully", compound=serialize(schemas.CompoundOut, row))
+        logger.info(
+            "Fetch external compound succeeded, cached new compound | query=%r id=%s match=%s",
+            query, row.id, (match or {}).get("type"),
+        )
+        return _fetch_ok(row, match, query)
 
     except BadRequestError as e:
         logger.warning("Fetch external compound failed: %s | query=%r", e, query)

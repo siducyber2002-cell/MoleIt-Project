@@ -1,12 +1,13 @@
 import os
 import time
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .logging_config import setup_logging, get_logger
-from .responses import register_exception_handlers, ok
+from .logging_config import setup_logging, get_logger, request_id_ctx, endpoint_ctx
+from .responses import register_exception_handlers, unhandled_exception_response, ok, err
 from .database import Base, engine, SessionLocal, run_light_migrations
 from .routers import auth as auth_router
 from .routers import compounds as compounds_router
@@ -36,10 +37,53 @@ app = FastAPI(
 )
 
 # Every raised HTTPException, every request-validation error, and any
-# unhandled exception now goes through these — logged, and returned to
-# the client in one consistent {success, status_code, message, ...} shape.
-# See app/responses.py for exactly what each one does.
+# unhandled exception goes through these — logged, and returned in the one
+# standard envelope (messageCode / status / errorCode / message / endpoint /
+# request_id). See app/responses.py for exactly what each one does.
 register_exception_handlers(app)
+
+
+# ---------------------------------------------------------------------------
+# Middleware order matters. Starlette makes the LAST-added middleware the
+# OUTERMOST one, so the request-context middleware is added first and CORS
+# last. That way every response — including the 500 built here for a crash —
+# still passes through CORS and carries its headers. Without that, the browser
+# reports a bare "Network Error" instead of the real status/endpoint, and the
+# frontend toast can't tell you which API failed.
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """For every request: assign a request id, bind it (and the endpoint) to
+    the logging context, log start/end with status + duration, turn any
+    unhandled crash into the standard 500 envelope, and echo the id back in
+    the X-Request-ID header. grep the id from a toast in logs/app.log to see
+    everything that happened during that one request."""
+    rid = (request.headers.get("x-request-id") or uuid.uuid4().hex[:12])[:64]
+    endpoint = f"{request.method} {request.url.path}"
+    rid_token = request_id_ctx.set(rid)
+    endpoint_token = endpoint_ctx.set(endpoint)
+    start = time.perf_counter()
+    try:
+        logger.info("REQUEST START | %s", endpoint)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            response = unhandled_exception_response(exc)
+
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        response.headers["X-Request-ID"] = rid
+        if response.status_code >= 500:
+            log = logger.error
+        elif response.status_code >= 400:
+            log = logger.warning
+        else:
+            log = logger.info
+        log("REQUEST END   | %s | status=%s | duration_ms=%s", endpoint, response.status_code, duration_ms)
+        return response
+    finally:
+        request_id_ctx.reset(rid_token)
+        endpoint_ctx.reset(endpoint_token)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,37 +91,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Lets the browser read these from cross-origin responses.
+    expose_headers=["X-Request-ID", "Content-Disposition", "X-Report-Filename"],
 )
-
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Logs every single request that hits the API with its method, path,
-    resulting status code, and how long it took. This is the fastest way
-    to see, end to end, which API call was made and whether it succeeded
-    or failed — grep logs/app.log for the path you're testing in Postman.
-    """
-    start = time.perf_counter()
-    logger.info("REQUEST START | %s %s", request.method, request.url.path)
-    try:
-        response = await call_next(request)
-    except Exception:
-        # Should rarely trigger — unhandled_exception_handler normally
-        # catches this first — but kept as a safety net so a crash still
-        # gets logged with timing even if something bypasses the handler.
-        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        logger.error(
-            "REQUEST CRASHED | %s %s | duration_ms=%s",
-            request.method, request.url.path, duration_ms, exc_info=True,
-        )
-        raise
-    duration_ms = round((time.perf_counter() - start) * 1000, 2)
-    log_level = logger.info if response.status_code < 400 else logger.warning
-    log_level(
-        "REQUEST END   | %s %s | status=%s | duration_ms=%s",
-        request.method, request.url.path, response.status_code, duration_ms,
-    )
-    return response
 
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
@@ -153,4 +169,8 @@ app.include_router(structure_router.router)
 @app.get("/api/health")
 def health_check():
     logger.info("Health check requested")
-    return ok(200, "API is healthy", health="ok")
+    try:
+        return ok(200, "API is healthy", health="ok")
+    except Exception:
+        logger.error("Health check crashed", exc_info=True)
+        return err(500, "Internal server error")

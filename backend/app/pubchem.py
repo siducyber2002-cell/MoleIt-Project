@@ -21,11 +21,15 @@ import re
 import time
 import math
 from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 from urllib.parse import quote
 
 import requests
 
+from .logging_config import get_logger
 from .net import DeadlineExceeded, run_with_deadline
+
+logger = get_logger(__name__)
 
 PUG_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 PUG_VIEW_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug_view"
@@ -109,23 +113,69 @@ def _get_json(url, **kwargs):
     return _get(url, **kwargs).json()
 
 
-def find_cid(query: str) -> int:
-    """Resolve a free-text name (or formula) to a PubChem CID."""
+# ---- Name resolution ------------------------------------------------------
+# PubChem's autocomplete happily suggests *something* for almost any string
+# ("batman" -> "Patman", an unrelated C32H53ClN2O compound), and the old code
+# accepted that blindly, then saved it to the library under the word the
+# user typed. So a suggestion is now only accepted if the query genuinely
+# resembles one of that compound's own names (title / IUPAC / synonyms):
+#   - identical after ignoring case, spaces, hyphens      -> accepted
+#   - the query is the start of a real name (>= 4 chars)  -> accepted ("aspir")
+#   - text similarity >= 0.85 to a real name              -> accepted ("aspirn")
+# anything else is treated as "no such compound" (a 404 the user can see).
+_MIN_CLOSE_RATIO = 0.85
+_MIN_PREFIX_CHARS = 4
+_MAX_NAMES_CHECKED = 200
+
+
+def _norm_name(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _looks_like(query: str, names: list[str]) -> bool:
+    q = _norm_name(query)
+    if not q:
+        return False
+    for name in names[:_MAX_NAMES_CHECKED]:
+        n = _norm_name(name)
+        if not n:
+            continue
+        if n == q:
+            return True
+        if len(q) >= _MIN_PREFIX_CHARS and n.startswith(q):
+            return True
+        if SequenceMatcher(None, q, n).ratio() >= _MIN_CLOSE_RATIO:
+            return True
+    return False
+
+
+def _fetch_all_synonyms(cid: int) -> list[str]:
+    data = _get_json(f"{PUG_BASE}/compound/cid/{cid}/synonyms/JSON")
+    info = data.get("InformationList", {}).get("Information", [])
+    return list(info[0].get("Synonym", [])) if info else []
+
+
+def resolve_cid(query: str) -> tuple[int, str]:
+    """Resolve a free-text name to (CID, match_type).
+
+    match_type is "exact" when PubChem itself maps the name/synonym to the
+    compound, or "closest" when the name only matched via autocomplete
+    (a typo or partial name) and passed the similarity check above.
+    Raises PubChemNotFoundError when nothing genuinely matches."""
     query = query.strip()
     if not query:
         raise PubChemNotFoundError()
 
-    # Try as a compound name first (covers "aspirin", "ethanol", etc.)
+    # 1. Exact name / synonym (covers "aspirin", "ethanol", "tylenol"...)
     try:
         data = _get_json(f"{PUG_BASE}/compound/name/{quote(query)}/cids/JSON")
         cids = data.get("IdentifierList", {}).get("CID", [])
         if cids:
-            return cids[0]
+            return cids[0], "exact"
     except PubChemNotFoundError:
         pass
 
-    # Fall back to autocomplete, in case of a typo or partial name, and
-    # retry the winning suggestion as an exact name lookup.
+    # 2. Autocomplete, for typos and partial names -- but verify the result.
     try:
         sugg = _get_json(
             f"https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/"
@@ -136,11 +186,22 @@ def find_cid(query: str) -> int:
             data = _get_json(f"{PUG_BASE}/compound/name/{quote(candidates[0])}/cids/JSON")
             cids = data.get("IdentifierList", {}).get("CID", [])
             if cids:
-                return cids[0]
+                names = [candidates[0], *_fetch_all_synonyms(cids[0])]
+                if _looks_like(query, names):
+                    return cids[0], "closest"
+                logger.warning(
+                    "PubChem autocomplete suggestion rejected as unrelated | query=%r suggestion=%r cid=%s",
+                    query, candidates[0], cids[0],
+                )
     except (PubChemNotFoundError, requests.RequestException):
         pass
 
     raise PubChemNotFoundError()
+
+
+def find_cid(query: str) -> int:
+    """Resolve a free-text name (or formula) to a PubChem CID."""
+    return resolve_cid(query)[0]
 
 
 _RING_CLOSURE_PERCENT = re.compile(r"%\d{2}")
@@ -1155,8 +1216,14 @@ def build_compound_record(query: str) -> dict:
 
 
 def _build_compound_record_by_name(query: str) -> dict:
-    cid = find_cid(query)
-    return _record_from_cid(cid, query_for_common_name=query)
+    cid, match_type = resolve_cid(query)
+    # Only an exact PubChem match may keep what the user typed as the
+    # "common name" (it is a genuine synonym). A corrected typo must not --
+    # otherwise "aspirn" gets saved as a name of Aspirin.
+    record = _record_from_cid(cid, query_for_common_name=query if match_type == "exact" else None)
+    # Not a Compound column: the fetch route pops this before saving.
+    record["_match"] = {"type": match_type, "query": query.strip()}
+    return record
 
 
 def build_compound_record_by_cid(cid: int) -> dict:

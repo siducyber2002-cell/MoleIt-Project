@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .logging_config import get_logger
 
@@ -96,6 +97,13 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    except StarletteHTTPException:
+        # An intentional 4xx (e.g. the 401 raised by the auth dependency) is
+        # normal control flow, not a database failure — roll back quietly and
+        # let it through. Logging it as an ERROR with a traceback here used
+        # to fill logs/error.log with false alarms on every unauthenticated call.
+        db.rollback()
+        raise
     except Exception:
         logger.error("Database session raised an exception mid-request; rolling back", exc_info=True)
         db.rollback()

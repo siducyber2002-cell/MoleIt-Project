@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { emitToast } from '../lib/toastBus';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -19,15 +20,62 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// ---- Error toasts -------------------------------------------------------
+// Every failed request (4xx / 5xx / network error / timeout) fires ONE toast
+// showing which endpoint failed and why. Success responses never toast.
+// The backend's standard error envelope (backend/app/responses.py) supplies
+// messageCode, errorCode, message, endpoint and request_id; when there's no
+// response at all (server down, timeout, CORS block) the toast falls back to
+// the method + URL of the request itself, so the failing API is still named.
+//
+// Opt out per request:  api.post(url, body, { skipErrorToast: true })
+function buildErrorToast(error) {
+  const res = error?.response;
+  const raw = res?.data;
+  const body = raw && typeof raw === 'object' && !(typeof Blob !== 'undefined' && raw instanceof Blob) ? raw : null;
+
+  const method = String(error?.config?.method || 'get').toUpperCase();
+  const path = error?.config?.url || '';
+
+  const timedOut = error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT';
+  const status = body?.messageCode ?? res?.status ?? (timedOut ? 'TIMEOUT' : 'NETWORK');
+  const errorCode = body?.errorCode || (res ? `HTTP_${res.status}` : timedOut ? 'TIMEOUT' : 'NETWORK_ERROR');
+
+  return {
+    status,
+    errorCode,
+    message: extractErrorMessage(error, `Request failed (${status})`),
+    endpoint: body?.endpoint && body.endpoint !== '-' ? body.endpoint : `${method} ${path}`,
+    requestId: body?.request_id || res?.headers?.['x-request-id'] || null,
+    timestamp: body?.timestamp || new Date().toISOString(),
+  };
+}
+
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
+    // Error bodies arrive as a Blob when a request used responseType 'blob'
+    // (the symmetry report download) — turn them back into the JSON envelope
+    // so the toast and extractErrorMessage() can read them.
+    const data = error?.response?.data;
+    if (typeof Blob !== 'undefined' && data instanceof Blob) {
+      try {
+        error.response.data = JSON.parse(await data.text());
+      } catch {
+        // body wasn't JSON — leave it, the toast falls back to status + endpoint
+      }
+    }
+
     const isAuthedRequest = Boolean(localStorage.getItem('molapp_token'));
     if (error?.response?.status === 401 && isAuthedRequest) {
       localStorage.removeItem('molapp_token');
       if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
         window.location.assign('/login');
       }
+    }
+
+    if (!axios.isCancel(error) && !error?.config?.skipErrorToast) {
+      emitToast(buildErrorToast(error));
     }
     return Promise.reject(error);
   }
@@ -47,7 +95,13 @@ export const fetchCompounds = (params) => api.get('/api/compounds', { params }).
 export const fetchCompoundCategories = () => api.get('/api/compounds/categories').then(pick('categories'));
 export const fetchCompound = (id) => api.get(`/api/compounds/${id}`).then(pick('compound'));
 export const fetchExternalCompound = (query) =>
-  api.post('/api/compounds/fetch', { query }).then(pick('compound'));
+  api.post('/api/compounds/fetch', { query }).then((r) => ({
+    compound: r.data.compound,
+    // `match` is present (type: 'exact' | 'closest') when the backend accepted an
+    // autocomplete/typo-corrected PubChem result instead of an exact name match.
+    match: r.data.match || null,
+    message: r.data.message,
+  }));
 export const matchCompoundsByFormula = (formula) =>
   api.get('/api/compounds/match/by-formula', { params: { formula } }).then(pick('matches'));
 export const resolveCompoundMatch = (payload) =>
@@ -75,7 +129,7 @@ export const analyzeStructure = (atoms, bonds) => {
     return Promise.resolve({ formula: '', molarMass: '', smiles: '', issues: [], bondOrders: {}, ringCount: 0 });
   }
   return api
-    .post('/api/structure/analyze', { atoms, bonds })
+    .post('/api/structure/analyze', { atoms, bonds }, { skipErrorToast: true }) // live, runs on every edit
     .then((r) => ({
       formula: r.data.formula || '',
       molarMass: r.data.molar_mass || '',
@@ -115,7 +169,11 @@ export const remapStructure = (newAtoms, newBonds, existingAtoms, existingBonds)
 // not computation; only the placement math moved.
 export const insertRing = (ringTypeId, centerX, centerY, atoms, bonds) =>
   api
-    .post('/api/structure/insert-ring', { ring_type_id: ringTypeId, center_x: centerX, center_y: centerY, atoms, bonds })
+    .post(
+      '/api/structure/insert-ring',
+      { ring_type_id: ringTypeId, center_x: centerX, center_y: centerY, atoms, bonds },
+      { skipErrorToast: true } // best-effort — see DrawCanvas
+    )
     .then((r) => ({ atoms: r.data.atoms, bonds: r.data.bonds }));
 
 // ---- Reactions ----
@@ -178,8 +236,11 @@ export const attachmentUrl = (relativeUrl) => `${API_BASE}${relativeUrl}`;
 export function extractErrorMessage(err, fallback = 'Something went wrong') {
   const payload = err?.response?.data;
   if (payload) {
-    if (Array.isArray(payload.errors) && payload.errors[0]?.msg) return payload.errors[0].msg;
+    // The backend's `message` is already the specific, human-readable one (for a
+    // validation failure it names the field: "Invalid 'email': ..."), so it
+    // wins; the raw per-field `errors` list is only a fallback.
     if (typeof payload.message === 'string' && payload.message) return payload.message;
+    if (Array.isArray(payload.errors) && payload.errors[0]?.msg) return payload.errors[0].msg;
     const detail = payload.detail;
     if (typeof detail === 'string' && detail) return detail;
     if (Array.isArray(detail) && detail[0]?.msg) return detail[0].msg;

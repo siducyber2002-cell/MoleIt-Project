@@ -140,7 +140,12 @@ def _run_analysis(structure_text: str, tolerance: float | None):
 @router.get("/demos")
 def list_demos():
     logger.info("List symmetry demos requested")
-    return ok(200, "Demo structures fetched successfully", demos=engine.DEMOS)
+    try:
+        logger.info("List symmetry demos succeeded | count=%d", len(engine.DEMOS))
+        return ok(200, "Demo structures fetched successfully", demos=engine.DEMOS)
+    except Exception:
+        logger.error("List symmetry demos crashed", exc_info=True)
+        return err(500, "Internal server error")
 
 
 @router.post("/analyze")
