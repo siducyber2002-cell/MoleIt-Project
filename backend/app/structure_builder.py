@@ -182,6 +182,8 @@ def _xtb_optimize(numbers, start_ang, charge, uhf, deadline):
         g = -2.0 * 5.0 * np.sum(diff / dist[:, :, None] ** 4, axis=1)
         return e, g.ravel()
 
+    best_seen = {"e": np.inf, "x": None}  # lowest-energy SCF-converged point visited so far
+
     def fun(x):
         if time.monotonic() > deadline:
             raise TimeoutError("xTB time budget used up")
@@ -189,35 +191,47 @@ def _xtb_optimize(numbers, start_ang, charge, uhf, deadline):
             calc = Calculator("GFN2-xTB", numbers, x.reshape(n, 3), charge=float(charge), uhf=int(uhf))
             calc.set("verbosity", 0)
             r = calc.singlepoint()
-            return float(r.get("energy")), np.asarray(r.get("gradient"), dtype=float).ravel()
+            e = float(r.get("energy"))
+            if e < best_seen["e"]:
+                best_seen["e"], best_seen["x"] = e, np.array(x, dtype=float)
+            return e, np.asarray(r.get("gradient"), dtype=float).ravel()
         except Exception:
             return penalty(x)
 
     x0 = (np.asarray(start_ang, dtype=float) / _BOHR).ravel()
-    out = minimize(fun, x0, jac=True, method="L-BFGS-B",
-                   options={"maxiter": XTB_MAX_STEPS, "gtol": XTB_GTOL, "ftol": 1e-13, "maxcor": 30})
+    timed_out = False
+    try:
+        out = minimize(fun, x0, jac=True, method="L-BFGS-B",
+                       options={"maxiter": XTB_MAX_STEPS, "gtol": XTB_GTOL, "ftol": 1e-13, "maxcor": 30})
+        x_final, success = out.x, bool(out.success)
 
-    # Second, tighter pass from the same point. Some molecules have a very
-    # soft, nearly-flat internal coordinate (e.g. the angle between the two
-    # rings of a sandwich compound, where the barrier is under 1 kcal/mol) --
-    # the first pass's gradient tolerance can leave that one coordinate short
-    # of its actual minimum even though everything else has converged. A
-    # second, stricter pass from the same starting point is cheap (it's
-    # already close) and squeezes out exactly that residual.
-    if time.monotonic() < deadline:
-        out2 = minimize(fun, out.x, jac=True, method="L-BFGS-B",
-                         options={"maxiter": XTB_MAX_STEPS, "gtol": XTB_GTOL / 20, "ftol": 1e-15, "maxcor": 30})
-        if out2.fun <= out.fun:
-            out = out2
+        # Second, tighter pass from the same point. Some molecules have a very
+        # soft, nearly-flat internal coordinate (e.g. the angle between the two
+        # rings of a sandwich compound, where the barrier is under 1 kcal/mol) --
+        # the first pass's gradient tolerance can leave that one coordinate short
+        # of its actual minimum even though everything else has converged.
+        if time.monotonic() < deadline:
+            out2 = minimize(fun, out.x, jac=True, method="L-BFGS-B",
+                            options={"maxiter": XTB_MAX_STEPS, "gtol": XTB_GTOL / 20, "ftol": 1e-15, "maxcor": 30})
+            if out2.fun <= out.fun:
+                x_final, success = out2.x, bool(out2.success)
+    except TimeoutError:
+        # Out of time budget mid-optimisation. Rather than throw the work away,
+        # return the best real xTB point visited so far (flagged as not fully
+        # converged). Only fail if no SCF ever succeeded.
+        if best_seen["x"] is None:
+            raise
+        timed_out = True
+        x_final, success = best_seen["x"], False
 
     # The final point must be a real, SCF-converged xTB minimum -- if it landed
     # inside the fallback penalty region (or the SCF is unstable right there),
     # this start is a failure, not just "not fully converged".
-    calc = Calculator("GFN2-xTB", numbers, out.x.reshape(n, 3), charge=float(charge), uhf=int(uhf))
+    calc = Calculator("GFN2-xTB", numbers, x_final.reshape(n, 3), charge=float(charge), uhf=int(uhf))
     calc.set("verbosity", 0)
     r = calc.singlepoint()
     energy = float(r.get("energy"))
-    return out.x.reshape(n, 3) * _BOHR, energy, bool(out.success)
+    return x_final.reshape(n, 3) * _BOHR, energy, success and not timed_out
 
 
 def _sane(coords: np.ndarray) -> bool:
@@ -489,6 +503,8 @@ def _xtb_build(mol: Chem.Mol) -> Generated:
             best = (energy, coords, ok)
         if k >= 1 and best is not None and abs(energy - best[0]) < 1e-5 and best[2]:
             break
+        if best is not None and best[2] and (time.monotonic() - started) > 0.4 * XTB_BUDGET_S:
+            break  # a converged result already cost a lot of the budget (slow host)
 
     if best is None:
         raise GenerationError("Could not relax a 3-D structure for this compound automatically.")
