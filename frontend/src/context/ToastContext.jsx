@@ -110,11 +110,6 @@ function Toast({ toast, onClose }) {
       </div>
 
       <p className="mt-1.5 pr-1 text-sm leading-snug text-lab-100">{toast.message}</p>
-
-      <p className="mt-1.5 break-all font-mono text-[11px] text-phosphor-dim">{toast.endpoint}</p>
-      {toast.requestId && (
-        <p className="mt-0.5 font-mono text-[10px] text-lab-500">request_id: {toast.requestId}</p>
-      )}
     </motion.div>
   );
 }
