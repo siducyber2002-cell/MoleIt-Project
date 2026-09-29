@@ -22,13 +22,18 @@ Both are free, pip-installable and need no external binaries or network.
 Public API:
     generate_3d(sdf_text) -> Generated      (raises GenerationError on failure)
 
-Nothing in here can be killed from outside once started (Python threads),
-so every long loop enforces its own wall-clock budget.
+A C++ call (RDKit embedding, MMFF) cannot be interrupted from inside a Python
+thread, so anything that could plausibly run long -- large, ring-rich or
+cage-like molecules, judged by size and ring count only, never by name -- runs
+in a child process that is killed when its time budget expires. Small
+molecules stay in-process (no start-up cost). Every long Python loop also
+enforces its own wall-clock budget.
 """
 from __future__ import annotations
 
 import hashlib
 import math
+import multiprocessing
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -45,8 +50,12 @@ RDLogger.DisableLog("rdApp.*")
 # ---------------------------------------------------------------- limits
 MAX_ATOMS_RDKIT = 150        # organic path
 MAX_ATOMS_XTB = 70           # xTB path (cost grows quickly with size)
-RDKIT_BUDGET_S = 12.0
-XTB_BUDGET_S = 40.0          # total for all xTB starts together
+RDKIT_BUDGET_S = 15.0        # hard cap for the RDKit stage of a "heavy" molecule
+GENERATION_TOTAL_S = 40.0    # whole pipeline; must stay below the router's 45 s cap
+XTB_BUDGET_S = 30.0          # max for all xTB starts together (shrinks if RDKit used time)
+SPAWN_SLACK_S = 5.0          # child-process start-up allowance
+HEAVY_ATOMS = 24             # heavy atoms above this -> run risky stages in a killable child
+HEAVY_RINGS = 3              # ring count above this  -> same (cages / fused polycycles)
 XTB_STARTS = 4               # random starting geometries tried
 XTB_MAX_STEPS = 600
 XTB_GTOL = 2e-5              # Hartree/Bohr -- tight, so flat torsions (ferrocene rings) settle
@@ -109,10 +118,25 @@ def _needs_xtb(mol: Chem.Mol) -> str | None:
 
 
 # ---------------------------------------------------------------- RDKit path
-def _embed(mol: Chem.Mol, n_confs: int, seed: int, random_coords: bool) -> list[int]:
+def _is_heavy(mol: Chem.Mol) -> bool:
+    """Size/ring-complexity test for "embedding this might take very long":
+    many heavy atoms, or many rings (fused polycycles, cages, fullerenes)."""
+    try:
+        n_rings = rdMolDescriptors.CalcNumRings(mol)
+    except Exception:
+        n_rings = 0
+    return mol.GetNumHeavyAtoms() > HEAVY_ATOMS or n_rings > HEAVY_RINGS
+
+
+def _embed(mol: Chem.Mol, n_confs: int, seed: int, random_coords: bool, plain_dg: bool = False) -> list[int]:
     params = AllChem.ETKDGv3()
     params.randomSeed = seed
     params.useRandomCoords = random_coords
+    if plain_dg:
+        # Plain distance geometry: no torsion/knowledge terms. Less pretty for
+        # flexible chains, but far more robust for strained ring systems.
+        params.useExpTorsionAnglePrefs = False
+        params.useBasicKnowledge = False
     params.numThreads = 1
     params.maxIterations = 200
     return list(AllChem.EmbedMultipleConfs(mol, n_confs, params))
@@ -128,9 +152,18 @@ def _rdkit_build(mol: Chem.Mol) -> Generated:
     n_confs = 1 if n_rot == 0 else min(30, 6 + 4 * n_rot)
 
     work = Chem.Mol(mol)
-    ids = _embed(work, n_confs, RANDOM_SEED, random_coords=False)
-    if not ids:
-        ids = _embed(work, n_confs, RANDOM_SEED, random_coords=True)
+    # (random_coords, plain_dg) strategies, in order. Ring-rich molecules do
+    # much better starting from random coordinates than from ETKDG's default
+    # eigenvalue embedding, so they try that first.
+    if _is_heavy(mol):
+        strategies = [(True, False), (True, True), (False, False)]
+    else:
+        strategies = [(False, False), (True, False), (True, True)]
+    ids: list[int] = []
+    for random_coords, plain_dg in strategies:
+        ids = _embed(work, n_confs, RANDOM_SEED, random_coords, plain_dg)
+        if ids:
+            break
     if not ids:
         raise GenerationError("Could not embed this molecule in 3-D.")
 
@@ -435,7 +468,7 @@ def _star_seeds(mol: Chem.Mol) -> list[np.ndarray]:
     return seeds
 
 
-def _xtb_build(mol: Chem.Mol) -> Generated:
+def _xtb_build(mol: Chem.Mol, budget: float = XTB_BUDGET_S) -> Generated:
     n = mol.GetNumAtoms()
     frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
     if len(frags) > 1 and all(f.GetNumAtoms() == 1 for f in frags):
@@ -467,7 +500,7 @@ def _xtb_build(mol: Chem.Mol) -> Generated:
         logger.info("structure_builder: %d VSEPR template start(s) for a %d-coordinate centre", len(star_seeds), n - 1)
 
     started = time.monotonic()
-    deadline = started + XTB_BUDGET_S
+    deadline = started + budget
     best = None  # (energy, coords, converged)
     total_starts = len(star_seeds) + XTB_STARTS
     for k in range(total_starts):
@@ -503,7 +536,7 @@ def _xtb_build(mol: Chem.Mol) -> Generated:
             best = (energy, coords, ok)
         if k >= 1 and best is not None and abs(energy - best[0]) < 1e-5 and best[2]:
             break
-        if best is not None and best[2] and (time.monotonic() - started) > 0.4 * XTB_BUDGET_S:
+        if best is not None and best[2] and (time.monotonic() - started) > 0.4 * budget:
             break  # a converged result already cost a lot of the budget (slow host)
 
     if best is None:
@@ -518,21 +551,80 @@ def _xtb_build(mol: Chem.Mol) -> Generated:
     return Generated(text=text, fmt="xyz", method="xtb", note=note)
 
 
+# ---------------------------------------------------------------- killable stages
+def _stage_worker(conn, stage: str, sdf_text: str, budget: float) -> None:
+    """Child-process entry point (must be module-level so 'spawn' can import it)."""
+    try:
+        mol = _mol_from_sdf(sdf_text)
+        gen = _rdkit_build(mol) if stage == "rdkit" else _xtb_build(mol, budget)
+        conn.send(("ok", (gen.text, gen.fmt, gen.method, gen.note)))
+    except GenerationError as exc:
+        conn.send(("gen", str(exc)))
+    except BaseException as exc:  # noqa: BLE001 -- report anything back to the parent
+        conn.send(("err", f"{type(exc).__name__}: {exc}"))
+    finally:
+        conn.close()
+
+
+def _run_stage(stage: str, sdf_text: str, budget: float, hard_timeout: float) -> Generated:
+    """Run one stage in a child process and kill it if it overruns."""
+    ctx = multiprocessing.get_context("spawn")
+    recv, send = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_stage_worker, args=(send, stage, sdf_text, budget), daemon=True)
+    proc.start()
+    send.close()
+    status, payload = "timeout", None
+    try:
+        if recv.poll(hard_timeout):
+            try:
+                status, payload = recv.recv()
+            except EOFError:
+                status, payload = "err", "worker exited without a result"
+    finally:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(timeout=2)
+        recv.close()
+    if status == "ok":
+        text, fmt, method, note = payload
+        return Generated(text=text, fmt=fmt, method=method, note=note)
+    if status == "gen":
+        raise GenerationError(payload)
+    if status == "timeout":
+        logger.info("structure_builder: %s stage killed after %.0fs", stage, hard_timeout)
+        raise GenerationError("Building a 3-D structure for this compound took too long.")
+    logger.info("structure_builder: %s stage failed in child | %s", stage, payload)
+    raise GenerationError("Could not build a 3-D structure for this compound automatically.")
+
+
 # ---------------------------------------------------------------- public
 @lru_cache(maxsize=128)
 def _generate_cached(digest: str, sdf_text: str) -> Generated:  # digest is just the cache key
+    t0 = time.monotonic()
     mol = _mol_from_sdf(sdf_text)
     reason = _needs_xtb(mol)
+    heavy = _is_heavy(mol)
     if reason is None:
         try:
-            gen = _rdkit_build(mol)
+            if heavy:
+                gen = _run_stage("rdkit", sdf_text, 0.0, RDKIT_BUDGET_S + SPAWN_SLACK_S)
+            else:
+                gen = _rdkit_build(mol)
             logger.info("structure_builder: RDKit succeeded | atoms=%d", mol.GetNumAtoms())
             return gen
         except GenerationError as exc:
             logger.info("structure_builder: RDKit path failed (%s), trying xTB", exc)
     else:
         logger.info("structure_builder: skipping RDKit force field | %s", reason)
-    gen = _xtb_build(mol)
+
+    remaining = GENERATION_TOTAL_S - (time.monotonic() - t0)
+    budget = min(XTB_BUDGET_S, remaining - (SPAWN_SLACK_S if heavy else 2.0))
+    if budget < 5.0:
+        raise GenerationError("Building a 3-D structure for this compound took too long.")
+    if heavy:
+        gen = _run_stage("xtb", sdf_text, budget, budget + SPAWN_SLACK_S)
+    else:
+        gen = _xtb_build(mol, budget)
     logger.info("structure_builder: xTB succeeded | atoms=%d", mol.GetNumAtoms())
     return gen
 
