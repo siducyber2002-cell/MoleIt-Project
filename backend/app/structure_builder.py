@@ -34,8 +34,9 @@ from __future__ import annotations
 import hashlib
 import math
 import multiprocessing
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 import numpy as np
@@ -71,8 +72,10 @@ SYM_REFINE_MAX_ATOMS = 150
 SYM_REFINE_MIN_S = 2.0              # don't even start with less time than this left
 HEAVY_ATOMS = 24             # heavy atoms above this -> run risky stages in a killable child
 HEAVY_RINGS = 3              # ring count above this  -> same (cages / fused polycycles)
+COMPLEX_SEEDS_PER_TEMPLATE = 5   # different ligand-ring puckerings tried for a metal complex
 XTB_STARTS = 4               # random starting geometries tried
 XTB_MAX_STEPS = 600
+XTB_CONVERGED_GMAX = 5e-4    # Hartree/Bohr: max |gradient| at the final point that counts as a relaxed minimum
 XTB_GTOL = 2e-5              # Hartree/Bohr -- tight, so flat torsions (ferrocene rings) settle
 RANDOM_SEED = 0xF00D
 
@@ -91,6 +94,10 @@ class Generated:
     fmt: str       # "sdf" | "xyz"
     method: str    # "rdkit" | "xtb"
     note: str      # one line for the UI
+    converged: bool = True  # False = xTB returned its best point but the optimisation never converged
+    # Other distinct relaxed minima found along the way (coordination complexes only), lowest energy
+    # first, INCLUDING the one in `text`: [{"text": xyz, "energy": Eh, "relKJ": kJ/mol above the lowest}]
+    alternatives: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- parsing
@@ -300,29 +307,29 @@ def _xtb_optimize(numbers, start_ang, charge, uhf, deadline):
 
     x0 = (np.asarray(start_ang, dtype=float) / _BOHR).ravel()
     timed_out = False
+    x_final = x0
     try:
-        out = minimize(fun, x0, jac=True, method="L-BFGS-B",
-                       options={"maxiter": XTB_MAX_STEPS, "gtol": XTB_GTOL, "ftol": 1e-13, "maxcor": 30})
-        x_final, success = out.x, bool(out.success)
-
-        # Second, tighter pass from the same point. Some molecules have a very
-        # soft, nearly-flat internal coordinate (e.g. the angle between the two
-        # rings of a sandwich compound, where the barrier is under 1 kcal/mol) --
-        # the first pass's gradient tolerance can leave that one coordinate short
-        # of its actual minimum even though everything else has converged.
-        if time.monotonic() < deadline:
-            out2 = minimize(fun, out.x, jac=True, method="L-BFGS-B",
-                            options={"maxiter": XTB_MAX_STEPS, "gtol": XTB_GTOL / 20, "ftol": 1e-15, "maxcor": 30})
-            if out2.fun <= out.fun:
-                x_final, success = out2.x, bool(out2.success)
+        # Restart L-BFGS from wherever it stopped (fresh curvature memory) until the
+        # gradient is small, it stalls, or time runs out. One long run is not enough for
+        # floppy chelate complexes: scipy often ends a run with "abnormal line search"
+        # even though the geometry is essentially relaxed, and a restart cures that.
+        tol = XTB_GTOL
+        for _round in range(4):
+            out = minimize(fun, x_final, jac=True, method="L-BFGS-B",
+                           options={"maxiter": XTB_MAX_STEPS, "gtol": tol, "ftol": 1e-13, "maxcor": 30})
+            moved = float(np.max(np.abs(out.x - x_final))) if _round else np.inf
+            x_final = out.x
+            gmax_now = float(np.max(np.abs(out.jac))) if getattr(out, "jac", None) is not None else np.inf
+            if gmax_now < XTB_CONVERGED_GMAX / 4 or moved < 1e-6 or time.monotonic() > deadline:
+                break
+            tol = max(tol / 4, 1e-6)
     except TimeoutError:
         # Out of time budget mid-optimisation. Rather than throw the work away,
-        # return the best real xTB point visited so far (flagged as not fully
-        # converged). Only fail if no SCF ever succeeded.
+        # return the best real xTB point visited so far. Only fail if no SCF ever succeeded.
         if best_seen["x"] is None:
             raise
         timed_out = True
-        x_final, success = best_seen["x"], False
+        x_final = best_seen["x"]
 
     # The final point must be a real, SCF-converged xTB minimum -- if it landed
     # inside the fallback penalty region (or the SCF is unstable right there),
@@ -331,7 +338,12 @@ def _xtb_optimize(numbers, start_ang, charge, uhf, deadline):
     calc.set("verbosity", 0)
     r = calc.singlepoint()
     energy = float(r.get("energy"))
-    return x_final.reshape(n, 3) * _BOHR, energy, success and not timed_out
+    gmax = float(np.max(np.abs(np.asarray(r.get("gradient"), dtype=float))))
+    # "Converged" is judged from the actual gradient at the returned geometry, not from
+    # scipy's success flag (which is False for a merely-stalled line search).
+    converged = gmax < XTB_CONVERGED_GMAX
+    logger.info("xtb final: gmax=%.2e Eh/Bohr converged=%s timed_out=%s", gmax, converged, timed_out)
+    return x_final.reshape(n, 3) * _BOHR, energy, converged
 
 
 def _sane(coords: np.ndarray) -> bool:
@@ -535,6 +547,141 @@ def _star_seeds(mol: Chem.Mol) -> list[np.ndarray]:
     return seeds
 
 
+# Elements treated as a coordination centre when they appear as a lone atom in a record.
+_METAL_Z = set(range(21, 31)) | set(range(39, 49)) | set(range(57, 81)) | {13, 31, 49, 50, 81, 82, 83}
+_DONOR_SYMBOLS = {"N", "O", "S", "P", "As", "Se"}
+_HALIDE_SYMBOLS = {"F", "Cl", "Br", "I"}
+
+
+def _complex_seeds(mol: Chem.Mol) -> list[np.ndarray]:
+    """PubChem stores many coordination complexes as an unbonded pile: one bare metal ion
+    plus the free ligands ([Co(en)3]3+ is Co3+ and three separate ethylenediamines). Packing
+    those on a circle leaves xTB a very long walk to the real complex and it rarely converges.
+    Here the metal is placed at the origin, the ligands' donor atoms (N/O/S/P with a lone
+    pair, or lone halide ions) are put on an ideal VSEPR polyhedron, chelating donors on cis
+    positions, and RDKit's distance geometry fills in the rest of each ligand around those
+    fixed points. Returns [] whenever the record doesn't fit that pattern, in which case the
+    generic fragment packing is used exactly as before."""
+    try:
+        frags = Chem.GetMolFrags(mol, asMols=False)
+        metals = [f[0] for f in frags if len(f) == 1 and mol.GetAtomWithIdx(f[0]).GetAtomicNum() in _METAL_Z]
+        if len(metals) != 1:
+            return []
+        metal = metals[0]
+        donors, ligand_of = [], {}
+        for li, f in enumerate(frags):
+            if len(f) == 1 and f[0] == metal:
+                continue
+            for ai in f:
+                a = mol.GetAtomWithIdx(ai)
+                sym = a.GetSymbol()
+                if sym in _DONOR_SYMBOLS and a.GetFormalCharge() <= 0 and a.GetTotalDegree() <= 3 + (1 if sym in ("P", "S") else 0):
+                    donors.append(ai); ligand_of[ai] = li
+                elif sym in _HALIDE_SYMBOLS and len(f) == 1 and a.GetFormalCharge() < 0:
+                    donors.append(ai); ligand_of[ai] = li
+        cn = len(donors)
+        templates = _vsepr_templates(cn)
+        if not templates:
+            return []
+        dm = Chem.GetDistanceMatrix(mol)
+        pairs = [(a, b) for i, a in enumerate(donors) for b in donors[i + 1:]
+                 if ligand_of[a] == ligand_of[b] and dm[a][b] <= 4]
+
+        import itertools
+        from .symmetry_engine import COVALENT_RADIUS
+        seeds = []
+        msym = mol.GetAtomWithIdx(metal).GetSymbol()
+        for tpl in templates:
+            best_perm, best_score = None, np.inf
+            for perm in itertools.permutations(range(cn)):
+                pos = {d: tpl[perm[i]] for i, d in enumerate(donors)}
+                score = 0.0
+                for a, b in pairs:
+                    ang = math.degrees(math.acos(float(np.clip(np.dot(pos[a], pos[b]), -1, 1))))
+                    score += (ang - 90.0) ** 2
+                if score < best_score - 1e-9:
+                    best_perm, best_score = perm, score
+                    if score < 1e-9:
+                        break
+            # bonded copy with dative donor->metal bonds so ETKDG treats it as one connected complex
+            rw = Chem.RWMol(mol)
+            for d in donors:
+                rw.AddBond(d, metal, Chem.BondType.DATIVE)
+            work = rw.GetMol()
+            work.UpdatePropertyCache(strict=False)
+            Chem.FastFindRings(work)
+            cmap = {metal: (0.0, 0.0, 0.0)}
+            from rdkit.Geometry import Point3D
+            cm = {metal: Point3D(0, 0, 0)}
+            for i, d in enumerate(donors):
+                r = COVALENT_RADIUS.get(msym, 1.3) + COVALENT_RADIUS.get(mol.GetAtomWithIdx(d).GetSymbol(), 0.9)
+                v = tpl[best_perm[i]] * r
+                cm[d] = Point3D(float(v[0]), float(v[1]), float(v[2]))
+            # random-coordinate embedding collapses the hydrogens onto each other around a fixed
+            # metal centre; the default eigenvalue-based start does not.
+            for attempt in range(COMPLEX_SEEDS_PER_TEMPLATE * 3):
+                if len(seeds) >= COMPLEX_SEEDS_PER_TEMPLATE * (templates.index(tpl) + 1):
+                    break
+                params = AllChem.ETKDGv3()
+                params.randomSeed = RANDOM_SEED + 977 * attempt
+                params.useRandomCoords = False
+                params.numThreads = 1
+                params.SetCoordMap(cm)
+                if AllChem.EmbedMolecule(work, params) != 0:
+                    continue
+                xyz = np.array(work.GetConformer().GetPositions())
+                if _sane(xyz):
+                    seeds.append(xyz)
+        if seeds:
+            base = seeds[0]
+            extra = []
+            # Chelate rings (donor-C-C-donor, e.g. ethylenediamine) can pucker either way (lambda /
+            # delta). All-same-hand rings give the textbook D3 complex, mixed ones give C2, and
+            # distance geometry always returns the same hand, so start from every count of
+            # "+" rings (0..k) explicitly and let xTB relax each one.
+            rings = []
+            for a, b in pairs:
+                path = Chem.GetShortestPath(mol, a, b)
+                if len(path) == 4:  # donor, C, C, donor
+                    rings.append(tuple(path))
+            if 1 <= len(rings) <= 4:
+                for plus in range(len(rings) + 1):
+                    trial = base.copy()
+                    for ri, (d1, c1, c2, d2) in enumerate(rings):
+                        sign = 1.0 if ri < plus else -1.0
+                        nrm = np.cross(trial[d1] - trial[metal], trial[d2] - trial[metal])
+                        ln = np.linalg.norm(nrm)
+                        if ln < 1e-6:
+                            continue
+                        nrm /= ln
+                        # push the two backbone carbons (and their hydrogens) to opposite faces of the chelate plane
+                        for atom, off in ((c1, +0.45), (c2, -0.45)):
+                            shift = sign * off * nrm
+                            trial[atom] += shift
+                            for nb in mol.GetAtomWithIdx(atom).GetNeighbors():
+                                if nb.GetAtomicNum() == 1:
+                                    trial[nb.GetIdx()] += shift
+                    if _sane(trial):
+                        extra.append(trial)
+            if extra:
+                seeds = extra + seeds[:1]
+            else:
+                # no chelate rings to pucker: jittered copies (fixed metal) explore nearby minima instead
+                rng = np.random.default_rng(RANDOM_SEED)
+                movable = np.ones(len(base), dtype=bool)
+                movable[metal] = False
+                for _ in range(COMPLEX_SEEDS_PER_TEMPLATE * len(templates) * 2):
+                    trial = base.copy()
+                    trial[movable] += rng.normal(0.0, 0.45, size=(int(movable.sum()), 3))
+                    if _sane(trial):
+                        seeds.append(trial)
+            logger.info("structure_builder: %d coordination-complex seed(s) | metal=%s cn=%d", len(seeds), msym, cn)
+        return seeds
+    except Exception as exc:  # noqa: BLE001 -- seeding is best-effort; never block the normal path
+        logger.info("structure_builder: complex seeding skipped (%s)", exc)
+        return []
+
+
 def _xtb_build(mol: Chem.Mol, budget: float = XTB_BUDGET_S) -> Generated:
     n = mol.GetNumAtoms()
     frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
@@ -562,13 +709,14 @@ def _xtb_build(mol: Chem.Mol, budget: float = XTB_BUDGET_S) -> Generated:
     if any(z > 86 for z in numbers):
         raise GenerationError("GFN2-xTB does not cover these elements.")
 
-    star_seeds = _star_seeds(mol) if n_frags == 1 else []
+    star_seeds = _star_seeds(mol) if n_frags == 1 else _complex_seeds(mol)
     if star_seeds:
-        logger.info("structure_builder: %d VSEPR template start(s) for a %d-coordinate centre", len(star_seeds), n - 1)
+        logger.info("structure_builder: %d template start(s) queued | atoms=%d", len(star_seeds), n)
 
     started = time.monotonic()
     deadline = started + budget
     best = None  # (energy, coords, converged)
+    found = []   # every sane, converged minimum: (energy, coords)
     total_starts = len(star_seeds) + XTB_STARTS
     for k in range(total_starts):
         if time.monotonic() > deadline:
@@ -587,6 +735,7 @@ def _xtb_build(mol: Chem.Mol, budget: float = XTB_BUDGET_S) -> Generated:
             params.numThreads = 1
             params.maxIterations = 100
             if AllChem.EmbedMolecule(work, params) != 0:
+                logger.info("xtb start %d skipped: RDKit could not embed a starting geometry", k)
                 continue
             start = np.array(work.GetConformer().GetPositions())
         try:
@@ -599,10 +748,14 @@ def _xtb_build(mol: Chem.Mol, budget: float = XTB_BUDGET_S) -> Generated:
         if not _sane(coords):
             continue
         logger.info("xtb start %d: E=%.6f Eh converged=%s", k, energy, ok)
+        if ok:
+            found.append((energy, coords))
         if best is None or energy < best[0] - 1e-7:
             best = (energy, coords, ok)
-        if k >= 1 and best is not None and abs(energy - best[0]) < 1e-5 and best[2]:
+        if k >= 1 and best is not None and abs(energy - best[0]) < 1e-5 and best[2] and not (n_frags > 1 and star_seeds):
             break
+        if n_frags > 1 and star_seeds and k >= len(star_seeds) - 1 and best is not None and best[2]:
+            break  # every purpose-built coordination seed has been tried; random packing adds nothing
         if best is not None and best[2] and (time.monotonic() - started) > 0.4 * budget:
             break  # a converged result already cost a lot of the budget (slow host)
 
@@ -614,8 +767,26 @@ def _xtb_build(mol: Chem.Mol, budget: float = XTB_BUDGET_S) -> Generated:
             "(semi-empirical, gas phase) because PubChem has no 3-D conformer.")
     if not ok:
         note += " The optimisation did not fully converge, so treat borderline symmetry with caution."
-    text = _xyz_text(symbols, coords, f"GFN2-xTB relaxed, E={energy:.6f} Eh")
-    return Generated(text=text, fmt="xyz", method="xtb", note=note)
+    # The marker rides in the XYZ comment line so /analyze can refuse this text later
+    # without any extra flag from the frontend.
+    comment = f"GFN2-xTB relaxed, E={energy:.6f} Eh" + ("" if ok else " NOT-CONVERGED")
+    text = _xyz_text(symbols, coords, comment)
+    alternatives = []
+    if n_frags > 1 and star_seeds and found:
+        distinct = []
+        for e, c in sorted(found, key=lambda t: t[0]):
+            if all(abs(e - e0) > 1e-5 for e0, _ in distinct):  # same energy = same minimum (or its mirror image)
+                distinct.append((e, c))
+        e_min = distinct[0][0]
+        alternatives = [
+            {"text": _xyz_text(symbols, c, f"GFN2-xTB relaxed, E={e:.6f} Eh"), "energy": e,
+             "relKJ": (e - e_min) * 2625.4996}
+            for e, c in distinct[:6]
+            if (e - e_min) * 2625.4996 < 60.0   # ignore distorted high-energy minima
+        ]
+        if len(alternatives) > 1:
+            note += f" {len(alternatives)} distinct relaxed conformers were found -- pick one to analyse."
+    return Generated(text=text, fmt="xyz", method="xtb", note=note, converged=bool(ok), alternatives=alternatives)
 
 
 # ---------------------------------------------------------------- symmetry refinement
@@ -836,7 +1007,7 @@ def _stage_worker(conn, stage: str, sdf_text: str, budget: float) -> None:
     try:
         mol = _mol_from_sdf(sdf_text)
         gen = _rdkit_build(mol, budget) if stage == "rdkit" else _xtb_build(mol, budget)
-        conn.send(("ok", (gen.text, gen.fmt, gen.method, gen.note)))
+        conn.send(("ok", (gen.text, gen.fmt, gen.method, gen.note, gen.converged, gen.alternatives)))
     except GenerationError as exc:
         conn.send(("gen", str(exc)))
     except BaseException as exc:  # noqa: BLE001 -- report anything back to the parent
@@ -865,8 +1036,8 @@ def _run_stage(stage: str, sdf_text: str, budget: float, hard_timeout: float) ->
         proc.join(timeout=2)
         recv.close()
     if status == "ok":
-        text, fmt, method, note = payload
-        return Generated(text=text, fmt=fmt, method=method, note=note)
+        text, fmt, method, note, converged, alternatives = payload
+        return Generated(text=text, fmt=fmt, method=method, note=note, converged=converged, alternatives=alternatives)
     if status == "gen":
         raise GenerationError(payload)
     if status == "timeout":
@@ -931,7 +1102,19 @@ def _generate_cached(digest: str, sdf_text: str) -> Generated:  # digest is just
     return gen
 
 
+_inflight_guard = threading.Lock()
+_inflight_locks: dict[str, threading.Lock] = {}
+
+
 def generate_3d(sdf_text: str) -> Generated:
-    """Build a 3-D structure from a (2-D) PubChem SDF. Raises GenerationError."""
+    """Build a 3-D structure from a (2-D) PubChem SDF. Raises GenerationError.
+
+    Serialised per structure: lru_cache does not coalesce concurrent calls, so a
+    double click (or an abandoned-but-still-running job from a timed-out request)
+    used to start a second identical xTB run that fought the first for CPU. The
+    second caller now waits and then hits the cache."""
     digest = hashlib.sha1(sdf_text.encode("utf-8", "ignore")).hexdigest()
-    return _generate_cached(digest, sdf_text)
+    with _inflight_guard:
+        lock = _inflight_locks.setdefault(digest, threading.Lock())
+    with lock:
+        return _generate_cached(digest, sdf_text)

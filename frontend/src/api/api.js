@@ -317,6 +317,14 @@ export const analyzeSymmetryFromPubchem = (query, tolerance) =>
 // user actually asks to calculate the point group.
 export const fetchPubchemStructure = (query) =>
   api.post('/api/symmetry/pubchem/structure', { query }).then(pick('preview'));
+// Second step for compounds PubChem only has a flat 2-D depiction of: the backend builds a real 3-D
+// geometry (RDKit / GFN2-xTB). Slower than everything else here (up to ~40 s), so it gets its own
+// longer timeout and never blocks the search itself.
+export const fetchPubchemGenerate3d = (cid) =>
+  api.post('/api/symmetry/pubchem/generate3d', { cid: String(cid) }, { timeout: 60000 }).then(pick('preview'));
+// One specific PubChem conformer of a compound (same preview shape as the search).
+export const fetchPubchemConformer = (cid, conformerId) =>
+  api.post('/api/symmetry/pubchem/conformer', { cid: String(cid), conformerId }).then(pick('preview'));
 
 // Point-group report download. The report is built on the backend
 // (POST /api/symmetry/report re-runs the analysis and returns a Markdown

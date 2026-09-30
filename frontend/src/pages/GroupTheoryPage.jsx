@@ -5,7 +5,10 @@ import {
 } from 'lucide-react';
 import SymmetryElementsViewer, { KIND_META } from '../components/Viewer3D/SymmetryElementsViewer';
 import { Reveal, StaggerGroup, Word, InlineReveal } from '../components/motion/ScrollReveal';
-import { fetchSymmetryDemos, analyzeSymmetry, fetchPubchemStructure, exportSymmetryReport, extractErrorMessage } from '../api/api';
+import {
+  fetchSymmetryDemos, analyzeSymmetry, fetchPubchemStructure, fetchPubchemGenerate3d, fetchPubchemConformer,
+  exportSymmetryReport, extractErrorMessage,
+} from '../api/api';
 import { symmetryAtomsToMolBlock } from '../lib/symmetryMolblock';
 import './GroupTheoryPage.css';
 
@@ -100,7 +103,11 @@ export default function GroupTheoryPage() {
   const [searching, setSearching] = useState(false);
   const [calculating, setCalculating] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const busy = searching || calculating;
+  // generating: the backend is building a 3-D geometry for a compound PubChem only has a 2-D drawing of.
+  // switchingConformer: fetching + analysing a conformer picked from the chooser.
+  const [generating, setGenerating] = useState(false);
+  const [switchingConformer, setSwitchingConformer] = useState(false);
+  const busy = searching || calculating || generating || switchingConformer;
   // The exact structure + tolerance (+ PubChem CID) the current result was
   // calculated from — this is what the backend re-analyzes for the export,
   // so the report always matches the result on screen even if the text box
@@ -119,6 +126,10 @@ export default function GroupTheoryPage() {
   // separate from `result` so the "point group not calculated yet" view
   // and the full report never get confused with each other.
   const [preview, setPreview] = useState(null);
+  // Alternative 3-D conformers of the loaded compound (PubChem's own, or ones the backend generated),
+  // and which one is on screen. Empty when there is only one, so no chooser is shown.
+  const [conformers, setConformers] = useState([]);
+  const [activeConformerId, setActiveConformerId] = useState(null);
   // Which "load a structure" tab is showing — paste-a-structure or
   // search-PubChem. Purely a UI toggle so both ways to load a molecule
   // live in one card instead of two stacked ones.
@@ -206,6 +217,34 @@ export default function GroupTheoryPage() {
   // and was the source of the long delay, since point-group detection
   // scales with atom count/symmetry richness. The engine now only runs
   // when the user clicks "Calculate point group" afterwards.
+  const applyPreview = (p) => {
+    setStructure(p.sourceStructure || structure);
+    setPreview(p);
+    setPubchemMeta({ cid: p.pubchemCid, url: p.pubchemUrl });
+    setConformers(p.conformers || []);
+    setActiveConformerId(p.activeConformerId || null);
+  };
+
+  // Second step for compounds with no 3-D record at PubChem: ask the backend to build a geometry.
+  // The 2-D drawing stays on screen (analysis blocked) until it comes back, so the search itself
+  // never waits on this.
+  const buildGenerated = async (p2d) => {
+    setGenerating(true);
+    try {
+      const g = await fetchPubchemGenerate3d(p2d.pubchemCid);
+      applyPreview(g);
+    } catch (err) {
+      setPreview({
+        ...p2d,
+        needsGeneration: false,
+        analysisBlocked: true,
+        structureWarning: extractErrorMessage(err, "Couldn't build a 3-D structure for this compound."),
+      });
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   const runPubchem = async (query = pubchemQuery) => {
     const q = String(query || '').trim();
     if (!q) return;
@@ -215,16 +254,46 @@ export default function GroupTheoryPage() {
     setResult(null);
     setPreview(null);
     setPubchemMeta(null);
+    setConformers([]);
+    setActiveConformerId(null);
+    let pending = null;
     try {
       const p = await fetchPubchemStructure(q);
-      setStructure(p.sourceStructure || structure);
-      setPreview(p);
-      setPubchemMeta({ cid: p.pubchemCid, url: p.pubchemUrl });
+      applyPreview(p);
+      if (p.needsGeneration) pending = p;
     } catch (err) {
       setError(extractErrorMessage(err, 'Could not fetch that compound from PubChem.'));
       setPreview(null);
     } finally {
       setSearching(false);
+    }
+    if (pending) buildGenerated(pending);
+  };
+
+  // Click on a conformer chip: load that exact geometry and show its point group straight away.
+  const selectConformer = async (c) => {
+    if (busy || c.id === activeConformerId) return;
+    const cid = pubchemMeta?.cid;
+    setError(null);
+    setSwitchingConformer(true);
+    try {
+      let text;
+      if (c.source === 'generated') {
+        text = c.structure;
+      } else {
+        const p = await fetchPubchemConformer(cid, c.id);
+        text = p.sourceStructure;
+      }
+      setStructure(text);
+      setActiveConformerId(c.id);
+      const r = await analyzeSymmetry(text, tolerance);
+      setResult(r);
+      setAnalyzed({ structure: text, tolerance, cid });
+      setPreview(null);
+    } catch (err) {
+      setError(extractErrorMessage(err, "Couldn't load or analyze that conformer."));
+    } finally {
+      setSwitchingConformer(false);
     }
   };
 
@@ -233,6 +302,8 @@ export default function GroupTheoryPage() {
     setPubchemQuery('');
     setPubchemMeta(null);
     setPreview(null);
+    setConformers([]);
+    setActiveConformerId(null);
     runAnalyze(demo.xyz, null);
   };
 
@@ -405,6 +476,8 @@ export default function GroupTheoryPage() {
                       // preview/attribution — it's no longer the fetched structure.
                       setPreview(null);
                       setPubchemMeta(null);
+                      setConformers([]);
+                      setActiveConformerId(null);
                     }}
                     rows={9}
                     spellCheck={false}
@@ -488,6 +561,36 @@ export default function GroupTheoryPage() {
             </div>
           )}
 
+          {conformers.length > 1 && (
+            <Reveal className="gt-card p-4 sm:p-5">
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--gt-ink-soft)]">
+                Choose a conformer
+              </label>
+              <p className="mb-2.5 text-[11px] leading-relaxed text-[var(--gt-ink)]/70">
+                This compound has {conformers.length} distinct 3-D shapes. Click one to load it and see its point group &mdash; different conformers can have different symmetry.
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {conformers.map((c) => {
+                  const active = c.id === activeConformerId;
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => selectConformer(c)}
+                      disabled={busy}
+                      aria-pressed={active}
+                      className="gt-chip"
+                      style={active ? { background: 'var(--gt-ink)', color: 'var(--gt-paper)' } : undefined}
+                    >
+                      {c.label}
+                    </button>
+                  );
+                })}
+                {switchingConformer && <Loader2 size={15} className="ml-1 animate-spin self-center" />}
+              </div>
+            </Reveal>
+          )}
+
           {!result && preview && (
             <>
               <Reveal className="gt-card p-4 sm:p-5">
@@ -495,14 +598,25 @@ export default function GroupTheoryPage() {
                   <div className="min-w-0">
                     <div className="gt-heading text-xl text-[var(--gt-ink)] sm:text-2xl">{preview.formulaPretty}</div>
                     <p className="mt-1 text-xs text-[var(--gt-ink-soft)]">
-                      3-D structure loaded &middot; {preview.atomCount} atoms &middot; {preview.bondCount} bonds
+                      {preview.analysisBlocked ? '2-D drawing only' : '3-D structure loaded'} &middot; {preview.atomCount} atoms &middot; {preview.bondCount} bonds
                     </p>
-                    <p className="mt-2 max-w-xl text-[12px] leading-relaxed text-[var(--gt-ink)]/80">
-                      Point group not calculated yet. Rotate and inspect the structure below, then hit
-                      &ldquo;Calculate point group&rdquo; when you&rsquo;re ready to run the symmetry engine.
-                    </p>
+                    {generating ? (
+                      <p className="mt-2 flex max-w-xl items-center gap-2 text-[12px] leading-relaxed text-[var(--gt-ink)]/80">
+                        <Loader2 size={13} className="shrink-0 animate-spin" />
+                        PubChem has no 3-D record for this compound &mdash; building a 3-D geometry now. This can take up to about 40 seconds.
+                      </p>
+                    ) : preview.analysisBlocked ? (
+                      <p className="mt-2 max-w-xl text-[12px] leading-relaxed text-[var(--gt-ink)]/80">
+                        No point group can be calculated from this flat drawing.
+                      </p>
+                    ) : (
+                      <p className="mt-2 max-w-xl text-[12px] leading-relaxed text-[var(--gt-ink)]/80">
+                        Point group not calculated yet. Rotate and inspect the structure below, then hit
+                        &ldquo;Calculate point group&rdquo; when you&rsquo;re ready to run the symmetry engine.
+                      </p>
+                    )}
                   </div>
-                  <button onClick={() => runAnalyze()} disabled={busy} className="gt-btn w-full justify-center sm:w-auto">
+                  <button onClick={() => runAnalyze()} disabled={busy || preview.analysisBlocked} className="gt-btn w-full justify-center sm:w-auto">
                     {calculating ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
                     Calculate point group
                   </button>

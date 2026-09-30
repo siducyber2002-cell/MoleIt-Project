@@ -104,6 +104,40 @@ def _get_with_retry(url, **kwargs):
 
 
 
+_BLOCK_2D = (
+    "This structure has flattened 2-D coordinates (every atom at z=0), so a point group computed from it "
+    "would be meaningless. No symmetry analysis was performed -- paste a real 3-D structure (XYZ/SDF/PDB)."
+)
+_BLOCK_UNCONVERGED = (
+    "The automatically generated 3-D geometry did not converge in the xTB optimisation, so it is not a "
+    "trustworthy minimum and no symmetry analysis was performed. Paste a real 3-D structure (XYZ/SDF/PDB), "
+    "e.g. from a crystal structure or your own optimisation."
+)
+_BLOCKED_QUALITIES = {
+    "2d-fallback": _BLOCK_2D,
+    "generated-3d-xtb-unconverged": _BLOCK_UNCONVERGED,
+}
+
+
+def _guard_structure_text(text: str) -> None:
+    """Refuses inputs that cannot give a meaningful point group. Detects a 2-D
+    molfile from its header dimensionality flag, and our own unconverged-xTB
+    marker. Raised as BadRequestError so /analyze answers 400 with the reason."""
+    if "NOT-CONVERGED" in text[:400] and "GFN2-xTB" in text[:400]:
+        raise BadRequestError(_BLOCK_UNCONVERGED)
+    lines = text.splitlines()
+    if len(lines) > 3 and re.search(r"\bV[23]000\b", text):
+        # molfile line 2 ends with the dimensionality code, e.g. "  -OEChem-093026072220 2D" style
+        # headers: ten date digits immediately followed by 2D / 3D. Look at both of the first
+        # header lines in case the name line was stripped or left blank.
+        for header in lines[:3]:
+            m = re.search(r"\d{10}([23])D", header)
+            if m:
+                if m.group(1) == "2":
+                    raise BadRequestError(_BLOCK_2D)
+                break
+
+
 class AnalyzeRequest(BaseModel):
     structure: str = Field(..., description="XYZ, SDF/MOL (V2000/V3000), or PDB text")
     tolerance: float | None = Field(None, ge=0.001, le=1.0)
@@ -113,6 +147,15 @@ class ReportRequest(BaseModel):
     structure: str = Field(..., description="The exact structure text the result was calculated from")
     tolerance: float | None = Field(None, ge=0.001, le=1.0)
     pubchemCid: str | None = Field(None, max_length=20, pattern=r"^\d+$", description="Optional PubChem CID, added to the report header")
+
+
+class GenerateRequest(BaseModel):
+    cid: str = Field(..., min_length=1, max_length=20, pattern=r"^\d+$", description="PubChem CID to build a 3-D geometry for")
+
+
+class ConformerRequest(BaseModel):
+    cid: str = Field(..., min_length=1, max_length=20, pattern=r"^\d+$")
+    conformerId: str = Field(..., min_length=4, max_length=40, pattern=r"^[0-9A-Za-z_-]+$")
 
 
 class PubchemRequest(BaseModel):
@@ -149,6 +192,7 @@ def list_demos():
 def analyze_structure(payload: AnalyzeRequest):
     logger.info("Symmetry analyze requested | chars=%d tol=%s", len(payload.structure), payload.tolerance)
     try:
+        _guard_structure_text(payload.structure)
         result = _run_analysis(payload.structure, payload.tolerance)
         logger.info("Symmetry analyze succeeded | group=%s ops=%s", result["group"], result["orderLabel"] or result["detectedOps"])
         return ok(200, "Structure analyzed successfully", result=result)
@@ -202,19 +246,103 @@ def export_report(payload: ReportRequest):
         return err(500, "Internal server error")
 
 
+def _preview_from_structure(cid: str, text: str, quality: str, note: str | None, warning: str | None,
+                            expected_formula: str | None = None) -> dict:
+    """Identity-checks a structure and turns it into the atoms/bonds preview the browser draws.
+    Never runs the symmetry engine."""
+    _verify_structure(cid, text, expected_formula)
+    parsed = engine.parse_structure(text)
+    formula = {}
+    for a in parsed["atoms"]:
+        formula[a["el"]] = formula.get(a["el"], 0) + 1
+    preview = {
+        "pubchemCid": cid,
+        "pubchemUrl": f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}",
+        "sourceStructure": text,
+        "structureQuality": quality,
+        "atomCount": len(parsed["atoms"]),
+        "bondCount": len(parsed["bonds"]),
+        "formulaPretty": engine.pretty_formula(formula),
+        "atoms": [{"el": a["el"], "x": a["p"][0], "y": a["p"][1], "z": a["p"][2]} for a in parsed["atoms"]],
+        "bonds": [[b[0], b[1]] for b in parsed["bonds"]],
+        "analysisBlocked": quality in _BLOCKED_QUALITIES,
+    }
+    if note:
+        preview["structureNote"] = note
+    if warning:
+        preview["structureWarning"] = warning
+    return preview
+
+
+_MAX_PUBCHEM_CONFORMERS = 10
+
+
+def _fetch_conformer_ids(cid: str) -> list[str]:
+    """PubChem's own conformer IDs for a compound (its diverse-conformer list, default first).
+    Best-effort: any failure just means no picker is shown."""
+    try:
+        resp = _get_with_retry(f"{PUG_BASE}/compound/cid/{quote(cid)}/conformers/JSON")
+        if not resp.ok:
+            return []
+        info = resp.json().get("InformationList", {}).get("Information", [])
+        ids = info[0].get("ConformerID", []) if info else []
+        return [str(i) for i in ids][:_MAX_PUBCHEM_CONFORMERS]
+    except Exception:  # noqa: BLE001
+        logger.info("PubChem conformer list unavailable | cid=%s", cid, exc_info=True)
+        return []
+
+
+def _pubchem_conformer_options(ids: list[str]) -> list[dict]:
+    if len(ids) < 2:
+        return []
+    return [
+        {"id": cid_, "source": "pubchem",
+         "label": f"Conformer {i + 1}" + (" (PubChem default)" if i == 0 else "")}
+        for i, cid_ in enumerate(ids)
+    ]
+
+
+def _fetch_conformer_sdf(conformer_id: str) -> str | None:
+    resp = _get_with_retry(f"{PUG_BASE}/conformers/{quote(conformer_id)}/SDF")
+    if resp.status_code == 404:
+        return None
+    if not resp.ok:
+        raise UpstreamServiceError(f"PubChem conformer lookup failed (HTTP {resp.status_code}).")
+    return resp.text.strip() or None
+
+
+def _error_response(e: Exception, label: str):
+    """Shared exception -> HTTP mapping for the structure-only endpoints."""
+    if isinstance(e, BadRequestError):
+        logger.warning("%s failed | reason=%s", label, e)
+        return err(400, str(e))
+    if isinstance(e, UpstreamServiceError):
+        logger.warning("%s upstream error | reason=%s", label, e)
+        return err(502, str(e))
+    if isinstance(e, UpstreamUnavailableError):
+        logger.warning("%s unavailable | reason=%s", label, e)
+        return err(503, str(e))
+    if isinstance(e, DeadlineExceeded):
+        logger.warning("%s timed out (deadline exceeded) | reason=%s", label, e)
+        return err(503, "PubChem took too long to respond (likely a network stall). Please try again.")
+    if isinstance(e, engine.SymmetryError):
+        logger.warning("%s parse failed | reason=%s", label, e)
+        return err(400, str(e))
+    logger.error("%s crashed", label, exc_info=e)
+    return err(500, "Internal server error")
+
+
 @router.post("/pubchem/structure")
 def fetch_pubchem_structure(payload: PubchemRequest):
-    """Resolves a compound name or CID and pulls its 3-D SDF conformer,
-    exactly like /pubchem below -- but stops there. It does NOT run
-    detect_operations()/analyze(), only the cheap parse_structure() pass,
-    so the browser can show the real 3-D structure the moment a search
-    resolves without also paying for a full symmetry-operation search
-    (which scales with atom count/symmetry richness and can be genuinely
-    slow) before the user has even asked for a point group. The frontend
-    calls this on search, then calls /analyze separately -- with this same
-    sourceStructure text -- only when the user clicks "Calculate point
-    group".
-    """
+    """Resolves a compound name or CID and returns its structure for display -- FAST. It never
+    builds a 3-D geometry itself (that can take tens of seconds and used to push this request past
+    the browser's 45 s timeout, so the search showed nothing at all).
+
+    - PubChem has a 3-D record: returned with the list of PubChem's other conformers
+      (`conformers`), so the UI can offer a choice.
+    - PubChem only has a flat 2-D depiction: returned immediately as a display-only preview with
+      `needsGeneration: true`; the browser then calls /pubchem/generate3d to build a real geometry.
+    The symmetry engine is NOT run here."""
     query = payload.query.strip()
     logger.info("Symmetry PubChem structure-only fetch requested | query=%r", query)
     try:
@@ -224,52 +352,66 @@ def fetch_pubchem_structure(payload: PubchemRequest):
         cid, sdf, quality, expected_formula = run_with_deadline(
             _resolve_and_fetch, query, cid_hint, timeout=_PUBCHEM_DEADLINE_SECONDS
         )
-        sdf, quality, note, warning = _maybe_generate_3d(sdf, quality)
-        # Identity gate: never hand a structure to the symmetry engine unless
-        # its formula/atom count matches the compound that was asked for.
-        _verify_structure(cid, sdf, expected_formula)
-        parsed = engine.parse_structure(sdf)
-        formula = {}
-        for a in parsed["atoms"]:
-            formula[a["el"]] = formula.get(a["el"], 0) + 1
-        preview = {
-            "pubchemCid": cid,
-            "pubchemUrl": f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}",
-            "sourceStructure": sdf,
-            "structureQuality": quality,
-            "atomCount": len(parsed["atoms"]),
-            "bondCount": len(parsed["bonds"]),
-            "formulaPretty": engine.pretty_formula(formula),
-            "atoms": [{"el": a["el"], "x": a["p"][0], "y": a["p"][1], "z": a["p"][2]} for a in parsed["atoms"]],
-            "bonds": [[b[0], b[1]] for b in parsed["bonds"]],
-        }
-        if note:
-            preview["structureNote"] = note
-        if warning:
-            preview["structureWarning"] = warning
-        logger.info(
-            "Symmetry PubChem structure-only fetch succeeded | cid=%s quality=%s atoms=%d",
-            cid, quality, preview["atomCount"],
-        )
+        preview = _preview_from_structure(cid, sdf, quality, None, None, expected_formula)
+        if quality == "3d":
+            options = _pubchem_conformer_options(_fetch_conformer_ids(cid))
+            if options:
+                preview["conformers"] = options
+                preview["activeConformerId"] = options[0]["id"]
+        else:
+            preview["needsGeneration"] = True
+        logger.info("Symmetry PubChem structure-only fetch succeeded | cid=%s quality=%s atoms=%d conformers=%d",
+                    cid, quality, preview["atomCount"], len(preview.get("conformers", [])))
         return ok(200, "Structure fetched successfully", preview=preview)
-    except BadRequestError as e:
-        logger.warning("Symmetry PubChem structure-only fetch failed | reason=%s", e)
-        return err(400, str(e))
-    except UpstreamServiceError as e:
-        logger.warning("Symmetry PubChem structure-only upstream error | reason=%s", e)
-        return err(502, str(e))
-    except UpstreamUnavailableError as e:
-        logger.warning("Symmetry PubChem structure-only unavailable | reason=%s", e)
-        return err(503, str(e))
-    except DeadlineExceeded as e:
-        logger.warning("Symmetry PubChem structure-only timed out (deadline exceeded) | reason=%s", e)
-        return err(503, "PubChem took too long to respond (likely a network stall). Please try again.")
-    except engine.SymmetryError as e:
-        logger.warning("Symmetry PubChem structure-only parse failed | reason=%s", e)
-        return err(400, str(e))
-    except Exception:
-        logger.error("Symmetry PubChem structure-only fetch crashed", exc_info=True)
-        return err(500, "Internal server error")
+    except Exception as e:  # noqa: BLE001
+        return _error_response(e, "Symmetry PubChem structure-only fetch")
+
+
+@router.post("/pubchem/generate3d")
+def generate_pubchem_3d(payload: GenerateRequest):
+    """Builds a real 3-D geometry for a compound PubChem only has a 2-D depiction of (RDKit for
+    ordinary organics, GFN2-xTB for metals / hypervalent centres -- see structure_builder.py).
+    Returns the preview like /pubchem/structure. When several distinct relaxed conformers are found
+    they come back in `conformers` (each carrying its own coordinates), lowest energy first.
+    If nothing trustworthy can be built the 2-D depiction is returned with `analysisBlocked: true`
+    and a warning -- never a fake 3-D result."""
+    cid = payload.cid
+    logger.info("Symmetry PubChem generate3d requested | cid=%s", cid)
+    try:
+        sdf_2d = run_with_deadline(_fetch_sdf, cid, "2d", timeout=_PUBCHEM_DEADLINE_SECONDS)
+        if not sdf_2d:
+            raise UpstreamServiceError(f"PubChem has no structure record at all for CID {cid}.")
+        text, quality, note, warning, alternatives = _generate_with_alternatives(sdf_2d)
+        preview = _preview_from_structure(cid, text, quality, note, warning)
+        if len(alternatives) > 1:
+            preview["conformers"] = [
+                {"id": f"gen-{i}", "source": "generated", "structure": alt["text"],
+                 "relEnergyKJ": round(alt["relKJ"], 2),
+                 "label": f"Conformer {i + 1}" + (" (lowest energy)" if i == 0 else f" (+{alt['relKJ']:.1f} kJ/mol)")}
+                for i, alt in enumerate(alternatives)
+            ]
+            preview["activeConformerId"] = "gen-0"
+        logger.info("Symmetry PubChem generate3d done | cid=%s quality=%s atoms=%d conformers=%d",
+                    cid, quality, preview["atomCount"], len(alternatives))
+        return ok(200, "Structure generated", preview=preview)
+    except Exception as e:  # noqa: BLE001
+        return _error_response(e, "Symmetry PubChem generate3d")
+
+
+@router.post("/pubchem/conformer")
+def fetch_pubchem_conformer(payload: ConformerRequest):
+    """One specific PubChem conformer of a compound, as the same kind of preview. The browser calls
+    /analyze on the returned `sourceStructure` to get that conformer's point group."""
+    logger.info("Symmetry PubChem conformer requested | cid=%s conformer=%s", payload.cid, payload.conformerId)
+    try:
+        sdf = run_with_deadline(_fetch_conformer_sdf, payload.conformerId, timeout=_PUBCHEM_DEADLINE_SECONDS)
+        if not sdf:
+            raise BadRequestError("PubChem has no conformer with that ID.")
+        preview = _preview_from_structure(payload.cid, sdf, "3d", None, None)
+        preview["activeConformerId"] = payload.conformerId
+        return ok(200, "Conformer fetched successfully", preview=preview)
+    except Exception as e:  # noqa: BLE001
+        return _error_response(e, "Symmetry PubChem conformer")
 
 
 @router.post("/pubchem")
@@ -310,6 +452,9 @@ def analyze_from_pubchem(payload: PubchemRequest):
         # Identity gate: never hand a structure to the symmetry engine unless
         # its formula/atom count matches the compound that was asked for.
         _verify_structure(cid, sdf, expected_formula)
+        if quality in _BLOCKED_QUALITIES:
+            logger.warning("Symmetry PubChem analysis blocked | cid=%s quality=%s", cid, quality)
+            raise BadRequestError(_BLOCKED_QUALITIES[quality])
         result = _run_analysis(sdf, payload.tolerance)
         result["pubchemCid"] = cid
         result["pubchemUrl"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
@@ -342,53 +487,53 @@ def analyze_from_pubchem(payload: PubchemRequest):
 
 
 # Hard wall-clock cap for the whole resolve-name-to-CID + fetch-SDF chain.
-_PUBCHEM_DEADLINE_SECONDS = 45
+_PUBCHEM_DEADLINE_SECONDS = 30
 
 # Separate budget for 3-D generation (RDKit/xTB), applied only when PubChem's
 # own fetch came back 2-D-only. Kept apart from _PUBCHEM_DEADLINE_SECONDS
 # above so a slow-but-working PubChem round trip can never eat into the time
 # generation gets, and vice versa -- these are two independent stages with
 # two independent failure modes.
-_GENERATION_DEADLINE_SECONDS = 45
+# Must stay under the browser's timeout for this call and above structure_builder.GENERATION_TOTAL_S (40).
+_GENERATION_DEADLINE_SECONDS = 44
 
 
-def _maybe_generate_3d(sdf: str, quality: str) -> tuple[str, str, str | None, str | None]:
-    """When PubChem only has a flattened 2-D depiction (quality ==
-    "2d-fallback"), tries to build a real 3-D structure instead -- RDKit's
-    distance geometry + MMFF94 for ordinary organic molecules, GFN2-xTB for
-    anything with a metal, a hypervalent centre or more than one fragment
-    (structure_builder.py has the detailed reasoning for each).
-
-    Returns (sdf, quality, note, warning):
-      - generation succeeds  -> the generated text, quality
-        "generated-3d-rdkit"/"generated-3d-xtb", an informational `note`
-        for the UI, warning=None.
-      - not attempted, or attempted and failed -> the original sdf/quality
-        unchanged, note=None, and the existing "this is a flattened 2-D
-        depiction" warning -- exactly today's behaviour, so a generation
-        failure never makes this endpoint worse than before it existed.
-    """
-    if quality != "2d-fallback":
-        return sdf, quality, None, None
+def _generate_with_alternatives(sdf: str) -> tuple[str, str, str | None, str | None, list[dict]]:
+    """Tries to build a real 3-D structure from a 2-D PubChem record.
+    Returns (text, quality, note, warning, alternatives). On success: the generated text,
+    quality "generated-3d-<method>" (suffix "-unconverged" and a blocking warning if the xTB
+    optimisation never converged), and any distinct alternative conformers. On failure: the
+    original 2-D sdf, quality "2d-fallback" and a warning -- analysis stays blocked."""
     warning = (
         "PubChem has no 3-D conformer on file for this compound, and an automatic 3-D structure "
-        "could not be generated for it either -- this is its flattened 2-D depiction (all atoms at "
-        "z=0), so the detected point group will over-report symmetry. Paste a real 3-D structure "
-        "(XYZ/SDF/PDB) for a trustworthy result."
+        "could not be generated for it either, so only its flattened 2-D depiction is available "
+        "(all atoms at z=0). No point group can be computed from that -- paste a real 3-D structure "
+        "(XYZ/SDF/PDB) instead."
     )
     try:
         gen = run_with_deadline(structure_builder.generate_3d, sdf, timeout=_GENERATION_DEADLINE_SECONDS)
-        logger.info("Symmetry PubChem 3-D generation succeeded | method=%s", gen.method)
-        return gen.text, f"generated-3d-{gen.method}", gen.note, None
+        logger.info("Symmetry PubChem 3-D generation succeeded | method=%s converged=%s alts=%d",
+                    gen.method, gen.converged, len(gen.alternatives))
+        if not gen.converged:
+            return gen.text, f"generated-3d-{gen.method}-unconverged", gen.note, _BLOCK_UNCONVERGED, []
+        return gen.text, f"generated-3d-{gen.method}", gen.note, None, gen.alternatives
     except structure_builder.GenerationError as e:
         logger.info("Symmetry PubChem 3-D generation declined | reason=%s", e)
-        return sdf, quality, None, f"{warning} ({e})"
+        return sdf, "2d-fallback", None, f"{warning} ({e})", []
     except DeadlineExceeded:
         logger.warning("Symmetry PubChem 3-D generation timed out")
-        return sdf, quality, None, warning
+        return sdf, "2d-fallback", None, warning, []
     except Exception:
         logger.error("Symmetry PubChem 3-D generation crashed", exc_info=True)
-        return sdf, quality, None, warning
+        return sdf, "2d-fallback", None, warning, []
+
+
+def _maybe_generate_3d(sdf: str, quality: str) -> tuple[str, str, str | None, str | None]:
+    """Used by the one-shot /pubchem endpoint: generation only when PubChem had 2-D only."""
+    if quality != "2d-fallback":
+        return sdf, quality, None, None
+    text, q, note, warning, _alts = _generate_with_alternatives(sdf)
+    return text, q, note, warning
 
 
 # ---- Compound identity resolution -----------------------------------------
