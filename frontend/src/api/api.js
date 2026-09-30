@@ -325,6 +325,10 @@ export const fetchPubchemGenerate3d = (cid) =>
 // One specific PubChem conformer of a compound (same preview shape as the search).
 export const fetchPubchemConformer = (cid, conformerId) =>
   api.post('/api/symmetry/pubchem/conformer', { cid: String(cid), conformerId }).then(pick('preview'));
+// Best-effort shape names (Staggered / Eclipsed / Chair ...) for PubChem's conformer IDs, as
+// { [conformerId]: { name, detail } }. Ids it can't name are simply missing from the map.
+export const fetchPubchemConformerNames = (cid, conformerIds) =>
+  api.post('/api/symmetry/pubchem/conformer-names', { cid: String(cid), conformerIds }).then(pick('names'));
 
 // Point-group report download. The report is built on the backend
 // (POST /api/symmetry/report re-runs the analysis and returns a Markdown

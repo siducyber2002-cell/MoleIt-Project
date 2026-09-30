@@ -7,6 +7,7 @@ import SymmetryElementsViewer, { KIND_META } from '../components/Viewer3D/Symmet
 import { Reveal, StaggerGroup, Word, InlineReveal } from '../components/motion/ScrollReveal';
 import {
   fetchSymmetryDemos, analyzeSymmetry, fetchPubchemStructure, fetchPubchemGenerate3d, fetchPubchemConformer,
+  fetchPubchemConformerNames,
   exportSymmetryReport, extractErrorMessage,
 } from '../api/api';
 import { symmetryAtomsToMolBlock } from '../lib/symmetryMolblock';
@@ -130,6 +131,9 @@ export default function GroupTheoryPage() {
   // and which one is on screen. Empty when there is only one, so no chooser is shown.
   const [conformers, setConformers] = useState([]);
   const [activeConformerId, setActiveConformerId] = useState(null);
+  // Shape names (Staggered, Eclipsed, Chair ...) for PubChem's own conformers, looked up in the background
+  // after a search: { [conformerId]: { name, detail } }. Generated conformers carry their name already.
+  const [conformerNames, setConformerNames] = useState({});
   // Which "load a structure" tab is showing — paste-a-structure or
   // search-PubChem. Purely a UI toggle so both ways to load a molecule
   // live in one card instead of two stacked ones.
@@ -223,6 +227,12 @@ export default function GroupTheoryPage() {
     setPubchemMeta({ cid: p.pubchemCid, url: p.pubchemUrl });
     setConformers(p.conformers || []);
     setActiveConformerId(p.activeConformerId || null);
+    const pubchemOnes = (p.conformers || []).filter((c) => c.source === 'pubchem');
+    if (pubchemOnes.length && p.pubchemCid) {
+      fetchPubchemConformerNames(p.pubchemCid, pubchemOnes.map((c) => c.id))
+        .then((names) => setConformerNames((prev) => ({ ...prev, ...names })))
+        .catch(() => {}); // names are decoration; the chooser works without them
+    }
   };
 
   // Second step for compounds with no 3-D record at PubChem: ask the backend to build a geometry.
@@ -343,6 +353,11 @@ export default function GroupTheoryPage() {
   }, []);
 
   const bondCount = result?.bonds?.length ?? preview?.bonds?.length ?? 0;
+  const conformerLabel = (c) => {
+    const n = c.name || conformerNames[c.id]?.name;
+    return n ? `${c.label} \u00b7 ${n}` : c.label;
+  };
+  const conformerTip = (c) => c.detail || conformerNames[c.id]?.detail || undefined;
   const liveStatusLine = pubchemMeta
     ? result
       ? `PubChem CID ${pubchemMeta.cid} \u00b7 3-D structure loaded into the simulator \u00b7 point group ${result.groupPretty} \u00b7 ${result.atomCount} atoms \u00b7 ${bondCount} bonds`
@@ -580,9 +595,10 @@ export default function GroupTheoryPage() {
                       disabled={busy}
                       aria-pressed={active}
                       className="gt-chip"
+                      title={conformerTip(c)}
                       style={active ? { background: 'var(--gt-ink)', color: 'var(--gt-paper)' } : undefined}
                     >
-                      {c.label}
+                      {conformerLabel(c)}
                     </button>
                   );
                 })}
@@ -600,6 +616,7 @@ export default function GroupTheoryPage() {
                     <p className="mt-1 text-xs text-[var(--gt-ink-soft)]">
                       {preview.analysisBlocked ? '2-D drawing only' : '3-D structure loaded'} &middot; {preview.atomCount} atoms &middot; {preview.bondCount} bonds
                     </p>
+                    {preview.conformerName && <ConformerBadge name={preview.conformerName} detail={preview.conformerDetail} />}
                     {generating ? (
                       <p className="mt-2 flex max-w-xl items-center gap-2 text-[12px] leading-relaxed text-[var(--gt-ink)]/80">
                         <Loader2 size={13} className="shrink-0 animate-spin" />
@@ -668,6 +685,7 @@ export default function GroupTheoryPage() {
                     <p className="mt-1 text-xs text-[var(--gt-ink-soft)]">
                       Detected automatically from {result.atomCount} atoms &middot; formula {result.formulaPretty}
                     </p>
+                    {result.conformerName && <ConformerBadge name={result.conformerName} detail={result.conformerDetail} />}
                     {result.groupDescription && (
                       <p className="mt-2 max-w-xl text-[12px] leading-relaxed text-[var(--gt-ink)]/80">
                         {result.groupDescription}
@@ -956,6 +974,22 @@ export default function GroupTheoryPage() {
         </div>
       </div>
     </div>
+    </div>
+  );
+}
+
+// The detected shape of the loaded geometry (Staggered, Eclipsed, Chair, Trigonal bipyramidal ...).
+function ConformerBadge({ name, detail }) {
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full border-2 border-[var(--gt-ink)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--gt-ink)]"
+        style={{ background: '#fdf1de' }}
+      >
+        <span className="uppercase tracking-wide text-[var(--gt-ink-soft)]">Conformer</span>
+        {name}
+      </span>
+      {detail && <span className="text-[11px] text-[var(--gt-ink-soft)]">{detail}</span>}
     </div>
   );
 }

@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from .. import symmetry_engine as engine
 from .. import symmetry_report as report_builder
 from .. import structure_builder
+from .. import conformer_naming
 from ..exceptions import BadRequestError, UpstreamServiceError, UpstreamUnavailableError
 from ..logging_config import get_logger
 from ..net import DeadlineExceeded, run_with_deadline
@@ -158,6 +159,11 @@ class ConformerRequest(BaseModel):
     conformerId: str = Field(..., min_length=4, max_length=40, pattern=r"^[0-9A-Za-z_-]+$")
 
 
+class ConformerNamesRequest(BaseModel):
+    cid: str = Field(..., min_length=1, max_length=20, pattern=r"^\d+$")
+    conformerIds: list[str] = Field(..., min_length=1, max_length=10)
+
+
 class PubchemRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Compound name or PubChem CID")
     tolerance: float | None = Field(None, ge=0.001, le=1.0)
@@ -177,9 +183,24 @@ def _run_analysis(structure_text: str, tolerance: float | None):
         # a while -- this is the same hard-deadline pattern used for the
         # PubChem network calls, applied to the analysis step itself, which
         # was previously the one part of this endpoint with no cap at all.
-        return run_with_deadline(engine.analyze, structure_text, tolerance or engine.TOL_DEFAULT, timeout=_ANALYSIS_DEADLINE_SECONDS)
+        result = run_with_deadline(engine.analyze, structure_text, tolerance or engine.TOL_DEFAULT, timeout=_ANALYSIS_DEADLINE_SECONDS)
     except engine.SymmetryError as e:
         raise BadRequestError(str(e))
+    _attach_conformer_name(result, structure_text)
+    return result
+
+
+def _attach_conformer_name(target: dict, structure_text: str, parsed: dict | None = None) -> None:
+    """Adds `conformerName` / `conformerDetail` (e.g. "Staggered", "Chair", "Trigonal bipyramidal")
+    when the geometry is recognisable. Purely decorative: any failure just leaves the keys out."""
+    try:
+        named = conformer_naming.name_conformer(parsed or engine.parse_structure(structure_text))
+    except Exception:  # noqa: BLE001
+        logger.info("Conformer naming skipped", exc_info=True)
+        return
+    if named:
+        target["conformerName"] = named["name"]
+        target["conformerDetail"] = named["detail"]
 
 
 @router.get("/demos")
@@ -271,6 +292,8 @@ def _preview_from_structure(cid: str, text: str, quality: str, note: str | None,
         preview["structureNote"] = note
     if warning:
         preview["structureWarning"] = warning
+    if not preview["analysisBlocked"]:
+        _attach_conformer_name(preview, text, parsed)
     return preview
 
 
@@ -384,18 +407,70 @@ def generate_pubchem_3d(payload: GenerateRequest):
         text, quality, note, warning, alternatives = _generate_with_alternatives(sdf_2d)
         preview = _preview_from_structure(cid, text, quality, note, warning)
         if len(alternatives) > 1:
-            preview["conformers"] = [
-                {"id": f"gen-{i}", "source": "generated", "structure": alt["text"],
-                 "relEnergyKJ": round(alt["relKJ"], 2),
-                 "label": f"Conformer {i + 1}" + (" (lowest energy)" if i == 0 else f" (+{alt['relKJ']:.1f} kJ/mol)")}
-                for i, alt in enumerate(alternatives)
-            ]
-            preview["activeConformerId"] = "gen-0"
+            options, kept = [], []  # kept: (name, relKJ) of options already shown
+            for alt in alternatives:
+                named = None
+                try:
+                    named = conformer_naming.name_conformer(engine.parse_structure(alt["text"]))
+                except Exception:  # noqa: BLE001
+                    pass
+                name = named["name"] if named else None
+                # two relaxed minima with the same name and (almost) the same energy are one conformer
+                if name and any(n == name and abs(e - alt["relKJ"]) < 0.5 for n, e in kept):
+                    continue
+                kept.append((name, alt["relKJ"]))
+                i = len(options)
+                opt = {"id": f"gen-{i}", "source": "generated", "structure": alt["text"],
+                       "relEnergyKJ": round(alt["relKJ"], 2),
+                       "label": f"Conformer {i + 1}" + (" (lowest energy)" if i == 0 else f" (+{alt['relKJ']:.1f} kJ/mol)")}
+                if named:
+                    opt["name"] = named["name"]
+                    opt["detail"] = named["detail"]
+                options.append(opt)
+            if len(options) > 1:
+                preview["conformers"] = options
+                preview["activeConformerId"] = "gen-0"
         logger.info("Symmetry PubChem generate3d done | cid=%s quality=%s atoms=%d conformers=%d",
                     cid, quality, preview["atomCount"], len(alternatives))
         return ok(200, "Structure generated", preview=preview)
     except Exception as e:  # noqa: BLE001
         return _error_response(e, "Symmetry PubChem generate3d")
+
+
+def _name_pubchem_conformer(conformer_id: str) -> dict | None:
+    sdf = _fetch_conformer_sdf(conformer_id)
+    if not sdf:
+        return None
+    return conformer_naming.name_conformer(engine.parse_structure(sdf))
+
+
+@router.post("/pubchem/conformer-names")
+def pubchem_conformer_names(payload: ConformerNamesRequest):
+    """Best-effort names (Staggered / Eclipsed / Chair ...) for PubChem's conformer IDs, so the chooser
+    can label its chips. Separate from the search on purpose: it downloads every conformer, which
+    would slow the search down. Never errors -- missing names are simply left out."""
+    ids = [i for i in payload.conformerIds if re.fullmatch(r"[0-9A-Za-z_-]{4,40}", i)][:_MAX_PUBCHEM_CONFORMERS]
+    logger.info("Symmetry PubChem conformer names requested | cid=%s n=%d", payload.cid, len(ids))
+
+    def work() -> dict:
+        names: dict = {}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {i: pool.submit(_name_pubchem_conformer, i) for i in ids}
+            for i, fut in futures.items():
+                try:
+                    named = fut.result()
+                except Exception:  # noqa: BLE001
+                    named = None
+                if named:
+                    names[i] = named
+        return names
+
+    try:
+        names = run_with_deadline(work, timeout=_PUBCHEM_DEADLINE_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.info("Symmetry PubChem conformer names unavailable", exc_info=True)
+        names = {}
+    return ok(200, "Conformer names computed", names=names)
 
 
 @router.post("/pubchem/conformer")

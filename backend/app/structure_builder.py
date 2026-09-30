@@ -101,6 +101,20 @@ class Generated:
 
 
 # ---------------------------------------------------------------- parsing
+def _charge_separate_triple_bonds(mol: Chem.Mol) -> None:
+    """Some records draw carbon monoxide as a neutral C#O, which RDKit rejects (O would have
+    valence 3). Write it the way RDKit expects, [C-]#[O+], so the ligand can be embedded.
+    Net charge is unchanged."""
+    for a in mol.GetAtoms():
+        if a.GetSymbol() != "O" or a.GetFormalCharge() != 0 or a.GetDegree() != 1:
+            continue
+        bond = a.GetBonds()[0]
+        c = bond.GetOtherAtom(a)
+        if bond.GetBondType() == Chem.BondType.TRIPLE and c.GetSymbol() == "C" and c.GetFormalCharge() == 0:
+            a.SetFormalCharge(1)
+            c.SetFormalCharge(-1)
+
+
 def _mol_from_sdf(sdf_text: str) -> Chem.Mol:
     """PubChem SDF -> RDKit Mol with explicit hydrogens. Tolerates the odd
     valences/charges organometallic records tend to have."""
@@ -109,6 +123,7 @@ def _mol_from_sdf(sdf_text: str) -> Chem.Mol:
         mol = Chem.MolFromMolBlock(sdf_text, removeHs=False, sanitize=False)
         if mol is None:
             raise GenerationError("Could not read the compound's connectivity from PubChem.")
+        _charge_separate_triple_bonds(mol)
         Chem.SanitizeMol(
             mol,
             sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_PROPERTIES ^ Chem.SANITIZE_KEKULIZE,
@@ -553,6 +568,50 @@ _DONOR_SYMBOLS = {"N", "O", "S", "P", "As", "Se"}
 _HALIDE_SYMBOLS = {"F", "Cl", "Br", "I"}
 
 
+def _linear_ligand_seeds(mol: Chem.Mol, frags, metal: int) -> list[np.ndarray]:
+    """Metal carbonyls / cyanides (Fe(CO)5, Ni(CO)4, Cr(CO)6 ...). PubChem draws these as the bare
+    metal plus N separate, unbonded C-O (or C-N) pairs. Every ligand is a rigid, linear rod that
+    binds through carbon, so the start geometry is exact: carbon on an ideal polyhedron vertex,
+    the other atom straight out behind it. xTB then only has to relax bond lengths and angles.
+    Returns [] if any other fragment is present, so ordinary complexes are unaffected."""
+    from .symmetry_engine import COVALENT_RADIUS
+    rods = []  # (carbon idx, partner idx)
+    for f in frags:
+        if len(f) == 1 and f[0] == metal:
+            continue
+        if len(f) != 2:
+            return []
+        syms = {mol.GetAtomWithIdx(i).GetSymbol(): i for i in f}
+        if "C" not in syms or not ({"O", "N"} & set(syms)):
+            return []
+        c = syms["C"]
+        partner = [i for i in f if i != c][0]
+        rods.append((c, partner))
+    templates = _vsepr_templates(len(rods))
+    if not templates:
+        return []
+    msym = mol.GetAtomWithIdx(metal).GetSymbol()
+    r_mc = COVALENT_RADIUS.get(msym, 1.3) + COVALENT_RADIUS.get("C", 0.76) - 0.25  # M-C(O) is short (back-bonding)
+    r_cx = 1.15
+    rng = np.random.default_rng(RANDOM_SEED)
+    seeds = []
+    for tpl in templates:
+        base = np.zeros((mol.GetNumAtoms(), 3))
+        for d, (c, x) in zip(tpl, rods):
+            base[c] = d * r_mc
+            base[x] = d * (r_mc + r_cx)
+        seeds.append(base)
+        movable = np.ones(len(base), dtype=bool)
+        movable[metal] = False
+        for _ in range(2):  # nudged copies let the optimiser fall into neighbouring minima
+            trial = base.copy()
+            trial[movable] += rng.normal(0.0, 0.25, size=(int(movable.sum()), 3))
+            if _sane(trial):
+                seeds.append(trial)
+    logger.info("structure_builder: %d metal-carbonyl seed(s) | metal=%s ligands=%d", len(seeds), msym, len(rods))
+    return seeds
+
+
 def _complex_seeds(mol: Chem.Mol) -> list[np.ndarray]:
     """PubChem stores many coordination complexes as an unbonded pile: one bare metal ion
     plus the free ligands ([Co(en)3]3+ is Co3+ and three separate ethylenediamines). Packing
@@ -568,6 +627,9 @@ def _complex_seeds(mol: Chem.Mol) -> list[np.ndarray]:
         if len(metals) != 1:
             return []
         metal = metals[0]
+        linear = _linear_ligand_seeds(mol, frags, metal)
+        if linear:
+            return linear
         donors, ligand_of = [], {}
         for li, f in enumerate(frags):
             if len(f) == 1 and f[0] == metal:
