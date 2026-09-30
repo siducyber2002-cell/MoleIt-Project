@@ -609,24 +609,15 @@ html.ix-native-cursor * {
   height: var(--ix-end-d);
   margin: calc(var(--ix-corner) + 36px) auto 0;
 }
-/* top-left credit, vertically centred on the fixed menu button (48px circle) */
-.ix-hero__credit {
-  position: absolute;
-  top: clamp(16px, 1.55vw, 28px);
-  left: var(--ix-pad-l);
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  height: 48px;
-  max-width: calc(100% - var(--ix-pad-l) - 170px);
-}
-.ix-hero__credit p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.35;
+.ix-road-credit {
+  margin: 0 auto;
+  max-width: 280px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
   color: var(--ix-ink-2);
 }
-.ix-hero__credit strong {
+.ix-road-credit strong {
   color: var(--ix-ink);
   font-weight: 700;
 }
@@ -666,6 +657,13 @@ html.ix-native-cursor * {
     left: 75%;
     top: calc(var(--ix-corner) + 36px);
     margin: 0 0 0 calc(var(--ix-end-d) / -2);
+  }
+  .ix-road-credit {
+    position: absolute;
+    left: 75%;
+    top: calc(var(--ix-corner) + 36px + var(--ix-end-d) + 14px);
+    width: 220px;
+    margin: 0 0 0 calc(220px / -2);
   }
 }
 
