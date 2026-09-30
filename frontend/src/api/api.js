@@ -319,9 +319,16 @@ export const fetchPubchemStructure = (query) =>
   api.post('/api/symmetry/pubchem/structure', { query }).then(pick('preview'));
 // Second step for compounds PubChem only has a flat 2-D depiction of: the backend builds a real 3-D
 // geometry (RDKit / GFN2-xTB). Slower than everything else here (up to ~40 s), so it gets its own
-// longer timeout and never blocks the search itself.
-export const fetchPubchemGenerate3d = (cid) =>
-  api.post('/api/symmetry/pubchem/generate3d', { cid: String(cid) }, { timeout: 60000 }).then(pick('preview'));
+// longer timeout and never blocks the search itself. Pass the 2-D structure the search already returned
+// (`preview.sourceStructure`) so the backend doesn't have to download the same record from PubChem again.
+export const fetchPubchemGenerate3d = (cid, structure) =>
+  api
+    .post(
+      '/api/symmetry/pubchem/generate3d',
+      { cid: String(cid), ...(structure ? { structure } : {}) },
+      { timeout: 60000 },
+    )
+    .then(pick('preview'));
 // One specific PubChem conformer of a compound (same preview shape as the search).
 export const fetchPubchemConformer = (cid, conformerId) =>
   api.post('/api/symmetry/pubchem/conformer', { cid: String(cid), conformerId }).then(pick('preview'));

@@ -241,7 +241,7 @@ export default function GroupTheoryPage() {
   const buildGenerated = async (p2d) => {
     setGenerating(true);
     try {
-      const g = await fetchPubchemGenerate3d(p2d.pubchemCid);
+      const g = await fetchPubchemGenerate3d(p2d.pubchemCid, p2d.sourceStructure);
       applyPreview(g);
     } catch (err) {
       setPreview({
