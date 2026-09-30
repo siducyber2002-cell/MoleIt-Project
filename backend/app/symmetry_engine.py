@@ -469,14 +469,56 @@ def _add_op(ops, op, atoms, tol):
         ops[k] = merged
     return True
 
-def _axis_candidates(atoms):
+def _principal_dirs(atoms):
+    """Principal axes of the inertia tensor and simple combinations of them.
+    For any structure with a unique-axis or D2-type symmetry these are EXACT
+    symmetry axes, so they are worth having in the candidate pool first."""
+    dirs = []
+    Imat = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    for a in atoms:
+        x, y, z = a["p"]
+        Imat[0][0] += y * y + z * z
+        Imat[1][1] += x * x + z * z
+        Imat[2][2] += x * x + y * y
+        Imat[0][1] -= x * y
+        Imat[0][2] -= x * z
+        Imat[1][2] -= y * z
+    Imat[1][0] = Imat[0][1]; Imat[2][0] = Imat[0][2]; Imat[2][1] = Imat[1][2]
+    eig = _jacobi_sym(Imat)
+    for v in eig["vectors"]:
+        dirs.append(v)
+    ev = eig["vectors"]
+    for i in range(3):
+        for j in range(i + 1, 3):
+            dirs.append(_add(ev[i], ev[j])); dirs.append(_sub(ev[i], ev[j]))
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            for sz in (-1, 1):
+                dirs.append(_add(_scale(ev[0], sx), _add(_scale(ev[1], sy), _scale(ev[2], sz))))
+    return dirs
+
+
+def _axis_candidates(atoms, tol=0.089):
     dirs = []
     for a in atoms:
         dirs.append(a["p"])
+    dirs.extend(_principal_dirs(atoms))
+    # Candidates are de-duplicated first-come-first-kept (see _unique_dirs), so
+    # ORDER decides which direction of a near-parallel cluster survives. Pairs
+    # of same-element atoms at (nearly) the same distance from the centre are
+    # the only ones a symmetry operation can map onto each other, so their sums,
+    # differences and cross products -- which are exact axes / plane normals for
+    # a symmetric structure -- go first; arbitrary pairs (which merely land
+    # near an axis by accident) only fill in behind them.
+    plausible, arbitrary = [], []
+    radii = [_len(a["p"]) for a in atoms]
     for i in range(len(atoms)):
         for j in range(i + 1, len(atoms)):
             a, b = atoms[i]["p"], atoms[j]["p"]
-            dirs.append(_add(a, b)); dirs.append(_sub(a, b)); dirs.append(_cross(a, b))
+            bucket = plausible if (atoms[i]["el"] == atoms[j]["el"] and abs(radii[i] - radii[j]) <= tol) else arbitrary
+            bucket.append(_add(a, b)); bucket.append(_sub(a, b)); bucket.append(_cross(a, b))
+    dirs.extend(plausible)
+    dirs.extend(arbitrary)
     # Triangular-face centroid/normal directions: needed for any polyhedral
     # point group whose Cn axis passes through the middle of a face rather
     # than through any single vertex or any 2-atom combination above — the
@@ -514,27 +556,6 @@ def _axis_candidates(atoms):
                     p, q, s = pts[i], pts[j], pts[k]
                     dirs.append(_add(p, _add(q, s)))  # centroid direction
                     dirs.append(_cross(_sub(q, p), _sub(s, p)))  # face normal
-    Imat = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-    for a in atoms:
-        x, y, z = a["p"]
-        Imat[0][0] += y * y + z * z
-        Imat[1][1] += x * x + z * z
-        Imat[2][2] += x * x + y * y
-        Imat[0][1] -= x * y
-        Imat[0][2] -= x * z
-        Imat[1][2] -= y * z
-    Imat[1][0] = Imat[0][1]; Imat[2][0] = Imat[0][2]; Imat[2][1] = Imat[1][2]
-    eig = _jacobi_sym(Imat)
-    for v in eig["vectors"]:
-        dirs.append(v)
-    ev = eig["vectors"]
-    for i in range(3):
-        for j in range(i + 1, 3):
-            dirs.append(_add(ev[i], ev[j])); dirs.append(_sub(ev[i], ev[j]))
-    for sx in (-1, 1):
-        for sy in (-1, 1):
-            for sz in (-1, 1):
-                dirs.append(_add(_scale(ev[0], sx), _add(_scale(ev[1], sy), _scale(ev[2], sz))))
     return _unique_dirs(dirs)
 
 def _plane_candidates(atoms, axes, all_dirs=None):
@@ -644,7 +665,7 @@ def detect_operations(atoms, tol):
     ops = {}
     _add_op(ops, {"label": "E", "kind": "E", "M": I3}, atoms, tol)
     R = normalize_mol(atoms)["atoms"]
-    axis_dirs = _axis_candidates(R)
+    axis_dirs = _axis_candidates(R, tol)
     # n_max previously scaled with atom count (up to 24), so every extra
     # atom in a real molecule meant testing rotation orders up to C24 and
     # improper rotations up to S48 for every candidate axis — chemically
