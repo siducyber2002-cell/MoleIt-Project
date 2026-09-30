@@ -10,6 +10,7 @@ PubChem 3-D structure proxy, so the browser never needs to talk to
 PubChem directly (no CORS, and it keeps the tolerance/engine logic
 server-side rather than duplicated in the client).
 """
+import re
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -220,10 +221,13 @@ def fetch_pubchem_structure(payload: PubchemRequest):
         if not query:
             raise BadRequestError("Enter a PubChem compound name or CID.")
         cid_hint = query if query.isdigit() else None
-        cid, sdf, quality = run_with_deadline(
+        cid, sdf, quality, expected_formula = run_with_deadline(
             _resolve_and_fetch, query, cid_hint, timeout=_PUBCHEM_DEADLINE_SECONDS
         )
         sdf, quality, note, warning = _maybe_generate_3d(sdf, quality)
+        # Identity gate: never hand a structure to the symmetry engine unless
+        # its formula/atom count matches the compound that was asked for.
+        _verify_structure(cid, sdf, expected_formula)
         parsed = engine.parse_structure(sdf)
         formula = {}
         for a in parsed["atoms"]:
@@ -299,10 +303,13 @@ def analyze_from_pubchem(payload: PubchemRequest):
         # `timeout=` at all; DNS stalls don't. This is the outer safety
         # net that guarantees this endpoint always responds instead of
         # hanging indefinitely (the bug just reported).
-        cid, sdf, quality = run_with_deadline(
+        cid, sdf, quality, expected_formula = run_with_deadline(
             _resolve_and_fetch, query, cid_hint, timeout=_PUBCHEM_DEADLINE_SECONDS
         )
         sdf, quality, note, warning = _maybe_generate_3d(sdf, quality)
+        # Identity gate: never hand a structure to the symmetry engine unless
+        # its formula/atom count matches the compound that was asked for.
+        _verify_structure(cid, sdf, expected_formula)
         result = _run_analysis(sdf, payload.tolerance)
         result["pubchemCid"] = cid
         result["pubchemUrl"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
@@ -384,64 +391,140 @@ def _maybe_generate_3d(sdf: str, quality: str) -> tuple[str, str, str | None, st
         return sdf, quality, None, warning
 
 
-def _resolve_and_fetch(query: str, cid_hint: str | None) -> tuple[str, str, str]:
+# ---- Compound identity resolution -----------------------------------------
+# RULE: the compound that gets analysed must be the compound that was asked
+# for. PubChem's autocomplete endpoint returns *something* for almost any
+# string ("sulfur pentafluoride chloride" -> "Sulfur pentafluoride", which is
+# actually S2F10, a completely different molecule), so an autocomplete
+# suggestion is NEVER used as the answer -- at most it is shown to the user
+# as a "did you mean" hint inside the error message. A compound is only
+# resolved when:
+#   1. the query is a CID, or
+#   2. PubChem's exact name/synonym lookup maps it, or
+#   3. the query is a molecular formula and PubChem's exact formula search
+#      finds it (and the fetched structure is then checked against it).
+# After the structure is fetched/generated, _verify_structure() also checks
+# its atom counts against PubChem's own MolecularFormula for that CID.
+
+_SUBSCRIPT_DIGITS = str.maketrans("\u2080\u2081\u2082\u2083\u2084\u2085\u2086\u2087\u2088\u2089", "0123456789")
+_FORMULA_TOKEN = re.compile(r"([A-Z][a-z]?)(\d*)")
+_FORMULA_FULL = re.compile(r"(?:[A-Z][a-z]?\d*)+")
+_ELEMENT_SYMBOLS = frozenset(
+    "H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn "
+    "Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce "
+    "Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn "
+    "Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl "
+    "Mc Lv Ts Og".split()
+)
+_FORMULA_POLL_ATTEMPTS = 3
+
+
+def _normalize_formula_query(query: str) -> str | None:
+    """'SF5Cl' / 'SF\u2085Cl' -> 'SF5Cl' when the text is a syntactically valid
+    molecular formula made only of real element symbols; otherwise None (so
+    ordinary names like 'aspirin' are never mistaken for formulas)."""
+    q = (query or "").strip().translate(_SUBSCRIPT_DIGITS).replace(" ", "")
+    if not q or not _FORMULA_FULL.fullmatch(q):
+        return None
+    if any(sym not in _ELEMENT_SYMBOLS for sym, _ in _FORMULA_TOKEN.findall(q)):
+        return None
+    return q
+
+
+def _formula_counts(formula: str) -> dict[str, int]:
+    """Element counts from a formula string such as 'C6H12O6', 'C2H3O2-'
+    (charge ignored) or 'CuSO4.5H2O' (hydrate multiplier applied)."""
+    counts: dict[str, int] = {}
+    for part in (formula or "").split("."):
+        part = part.strip()
+        m = re.match(r"^(\d+)(.*)$", part)
+        mult, body = (int(m.group(1)), m.group(2)) if m else (1, part)
+        body = re.sub(r"[+-]\d*$", "", body)
+        for sym, n in _FORMULA_TOKEN.findall(body):
+            counts[sym] = counts.get(sym, 0) + mult * (int(n) if n else 1)
+    return counts
+
+
+def _pretty_counts(counts: dict[str, int]) -> str:
+    """Hill-ordered display string: C first, H second, rest alphabetical
+    (or fully alphabetical when there is no carbon)."""
+    keys = sorted(counts)
+    if "C" in counts:
+        keys = ["C"] + (["H"] if "H" in counts else []) + [k for k in keys if k not in ("C", "H")]
+    return "".join(f"{k}{counts[k] if counts[k] > 1 else ''}" for k in keys)
+
+
+def _resolve_and_fetch(query: str, cid_hint: str | None) -> tuple[str, str, str, str | None]:
     """Runs entirely inside run_with_deadline's worker thread. Returns
-    (cid, sdf, quality). Any BadRequestError / UpstreamServiceError /
-    UpstreamUnavailableError raised inside propagates through unchanged."""
+    (cid, sdf, quality, expected_formula). expected_formula is only set when
+    the CID came from a formula search, so the fetched structure can be
+    checked against exactly what was typed. Any BadRequestError /
+    UpstreamServiceError / UpstreamUnavailableError raised inside propagates
+    through unchanged."""
     logger.info("_resolve_and_fetch: starting | query=%r cid_hint=%r thread=%s", query, cid_hint, threading.current_thread().name)
-    cid = cid_hint or _resolve_cid(query)
+    if cid_hint:
+        cid, expected_formula = cid_hint, None
+    else:
+        cid, expected_formula = _resolve_cid(query)
     logger.info("_resolve_and_fetch: cid resolved to %s, fetching SDF", cid)
     sdf, quality = _fetch_sdf_with_fallback(cid)
     logger.info("_resolve_and_fetch: sdf fetched | cid=%s quality=%s len=%d", cid, quality, len(sdf))
-    return cid, sdf, quality
+    return cid, sdf, quality, expected_formula
 
 
-def _resolve_cid(name: str) -> str:
-    """Exact name lookup first; if PubChem doesn't recognize it verbatim
-    (a typo, a partial name, or a synonym it indexes differently), retry
-    against its autocomplete suggestion before giving up. Mirrors the same
-    two-step resolution the compound-library tab already relies on
-    (pubchem.py's find_cid) — this tab was missing that fallback entirely,
-    so anything not spelled exactly as PubChem's canonical name failed.
+def _resolve_cid(name: str) -> tuple[str, str | None]:
+    """Resolves a name/formula to (cid, expected_formula) using ONLY exact
+    identity matches -- see the RULE comment above. Raises BadRequestError
+    (with non-binding "did you mean" hints) when nothing matches exactly.
 
-    BUG FIX: previously, the moment PubChem was confirmed *unreachable*
-    (not "compound not found" — actually unreachable), this kept going and
-    tried the autocomplete endpoint and a second exact lookup anyway, on
-    the exact same dead network path, multiplying one timeout into three.
-    Now an UpstreamUnavailableError is treated as final immediately — no
-    point retrying a fallback over a connection that just failed — while a
-    genuine "not found" (a clean 404, PubChem was reachable) still falls
-    through to autocomplete as before.
+    An UpstreamUnavailableError (PubChem unreachable) still propagates
+    straight out, as before: no point trying a fallback over a dead path.
     """
+    name = name.translate(_SUBSCRIPT_DIGITS)  # "SF\u2085Cl" -> "SF5Cl"; subscripts are never part of a real name
     logger.info("_resolve_cid: starting exact lookup for %r", name)
     try:
         cid = _lookup_cid_exact(name)
     except UpstreamServiceError:
-        cid = None  # PubChem answered but with something unusable; still try autocomplete
-    # An UpstreamUnavailableError (network truly down) is intentionally not
-    # caught here — it propagates straight out and skips the rest of this
-    # function, since retrying on the same dead path can't help.
+        cid = None
     if cid:
-        logger.info("_resolve_cid: exact lookup succeeded | name=%r cid=%s", name, cid)
-        return cid
+        logger.info("_resolve_cid: exact name lookup succeeded | name=%r cid=%s", name, cid)
+        return cid, None
 
-    logger.info("_resolve_cid: exact lookup found nothing, trying autocomplete for %r", name)
-    resp = _get_with_retry(
-        f"https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/{quote(name)}/json",
-        params={"limit": 1},
-    )
-    if resp.ok:
-        candidates = resp.json().get("dictionary_terms", {}).get("compound", [])
-        if candidates:
-            try:
-                cid = _lookup_cid_exact(candidates[0])
-            except UpstreamServiceError:
-                cid = None
-            if cid:
-                logger.info("_resolve_cid: autocomplete resolved | name=%r suggestion=%r cid=%s", name, candidates[0], cid)
-                return cid
+    formula = _normalize_formula_query(name)
+    if formula:
+        logger.info("_resolve_cid: name lookup missed, trying exact formula search | formula=%s", formula)
+        cids = _lookup_cids_by_formula(formula)
+        if cids:
+            if len(cids) > 1:
+                logger.info("_resolve_cid: formula %s matched %d records, using first | cids=%s", formula, len(cids), cids)
+            logger.info("_resolve_cid: formula search succeeded | formula=%s cid=%s", formula, cids[0])
+            return cids[0], formula
 
-    raise BadRequestError(f"PubChem did not return a compound CID for \u201c{name}\u201d.")
+    suggestions = _autocomplete_suggestions(name)
+    logger.warning("_resolve_cid: NO exact match | query=%r suggestions(not used)=%s", name, suggestions)
+    msg = f"PubChem has no compound that exactly matches \u201c{name}\u201d, so nothing was analysed."
+    if suggestions:
+        msg += (
+            " Similar PubChem names (suggestions only \u2014 NOT used, they may be different molecules): "
+            + ", ".join(suggestions) + "."
+        )
+    msg += " Try PubChem's exact name, the molecular formula (e.g. SF5Cl), or a CID."
+    raise BadRequestError(msg)
+
+
+def _autocomplete_suggestions(name: str, limit: int = 5) -> list[str]:
+    """Non-binding 'did you mean' hints for the error message. Never used to
+    pick a compound; any failure here just means no hints."""
+    try:
+        resp = _get_with_retry(
+            f"https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/{quote(name)}/json",
+            params={"limit": limit},
+        )
+        if not resp.ok:
+            return []
+        return [str(c) for c in resp.json().get("dictionary_terms", {}).get("compound", [])][:limit]
+    except (UpstreamUnavailableError, ValueError):
+        return []
 
 
 def _lookup_cid_exact(name: str) -> str | None:
@@ -453,6 +536,84 @@ def _lookup_cid_exact(name: str) -> str | None:
         raise UpstreamServiceError(f"PubChem name lookup failed (HTTP {resp.status_code}).")
     cids = resp.json().get("IdentifierList", {}).get("CID", [])
     return str(cids[0]) if cids else None
+
+
+def _lookup_cids_by_formula(formula: str, max_records: int = 5) -> list[str]:
+    """PubChem exact molecular-formula search. fastformula can answer
+    asynchronously (a ListKey to poll); we poll briefly then give up."""
+    url = f"{PUG_BASE}/compound/fastformula/{quote(formula)}/cids/JSON"
+    resp = _get_with_retry(url, params={"MaxRecords": max_records})
+    if not resp.ok:
+        logger.info("_lookup_cids_by_formula: status=%s for %s", resp.status_code, formula)
+        return []
+    data = resp.json()
+    cids = data.get("IdentifierList", {}).get("CID")
+    if cids:
+        return [str(c) for c in cids[:max_records]]
+    list_key = data.get("Waiting", {}).get("ListKey")
+    if not list_key:
+        return []
+    for _ in range(_FORMULA_POLL_ATTEMPTS):
+        time.sleep(1)
+        poll = _get_with_retry(
+            f"{PUG_BASE}/compound/listkey/{list_key}/cids/JSON", params={"MaxRecords": max_records}
+        )
+        if poll.ok:
+            cids = poll.json().get("IdentifierList", {}).get("CID")
+            if cids:
+                return [str(c) for c in cids[:max_records]]
+    return []
+
+
+def _fetch_record_formula(cid: str) -> str | None:
+    """PubChem's own MolecularFormula for this CID, or None if unavailable
+    (a failed check is logged and skipped, never treated as a mismatch)."""
+    try:
+        resp = _get_with_retry(f"{PUG_BASE}/compound/cid/{quote(cid)}/property/MolecularFormula/JSON")
+        if not resp.ok:
+            logger.warning("_fetch_record_formula: HTTP %s for cid=%s", resp.status_code, cid)
+            return None
+        props = resp.json().get("PropertyTable", {}).get("Properties", [])
+        return props[0].get("MolecularFormula") if props else None
+    except (UpstreamUnavailableError, ValueError):
+        logger.warning("_fetch_record_formula: could not fetch formula for cid=%s", cid)
+        return None
+
+
+def _verify_structure(cid: str, sdf: str, expected_formula: str | None) -> None:
+    """Final identity gate, run on the exact text that will be analysed
+    (including a generated 3-D structure). Compares the structure's element
+    counts against (a) the formula the user typed, when the CID came from a
+    formula search, and (b) PubChem's MolecularFormula for that CID. Any
+    mismatch raises BadRequestError -- we refuse rather than analyse a
+    different molecule."""
+    parsed = engine.parse_structure(sdf)
+    got: dict[str, int] = {}
+    for a in parsed["atoms"]:
+        el = a["el"].capitalize()
+        el = "H" if el in ("D", "T") else el
+        got[el] = got.get(el, 0) + 1
+    got_label = f"{_pretty_counts(got)} ({sum(got.values())} atoms)"
+
+    if expected_formula:
+        want = _formula_counts(expected_formula)
+        if want != got:
+            logger.warning("_verify_structure: MISMATCH vs query formula | cid=%s want=%s got=%s", cid, want, got)
+            raise BadRequestError(
+                f"Structure mismatch: you searched {_pretty_counts(want)}, but the structure obtained "
+                f"for PubChem CID {cid} is {got_label}. Nothing was analysed."
+            )
+
+    record = _fetch_record_formula(cid)
+    if record:
+        want = _formula_counts(record)
+        if want != got:
+            logger.warning("_verify_structure: MISMATCH vs PubChem record | cid=%s record=%s got=%s", cid, want, got)
+            raise BadRequestError(
+                f"Structure mismatch: PubChem CID {cid} is {_pretty_counts(want)}, but the structure "
+                f"obtained is {got_label}. Nothing was analysed."
+            )
+    logger.info("_verify_structure: OK | cid=%s formula=%s", cid, _pretty_counts(got))
 
 
 def _fetch_sdf_with_fallback(cid: str) -> tuple[str, str]:
