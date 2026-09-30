@@ -545,6 +545,14 @@ export default function Home() {
       <main className="ix-main">
         {/* ── 01 / HERO — Mole It logo + tagline, orbiting atom inside the ring ── */}
         <section className="ix-hero" id="top">
+          {/* top-left, on the same line as the fixed menu button */}
+          <Reveal trigger="mount" delay={0.3} direction="none" className="ix-hero__credit">
+            <p>
+              Developed and Designed by <strong>Siddhartha Dhar</strong> and{' '}
+              <strong>Subhranil Manna</strong>
+            </p>
+          </Reveal>
+
           <div className="ix-hero__copy">
             <Reveal trigger="mount" direction="none">
               <SectionLabel n={1}>Hero</SectionLabel>
@@ -874,10 +882,6 @@ export default function Home() {
           <div className="ix-finale__end">
             <div className="ix-run" data-road="run2" style={{ top: 0 }} />
             <div className="ix-endring" data-road="end" aria-hidden="true" />
-            <p className="ix-road-credit">
-              Developed and Designed by <strong>Siddhartha Dhar</strong> and{' '}
-              <strong>Subhranil Manna</strong>
-            </p>
             <footer className="ix-footer">
               <MoleItLogo size="sm" tone="light" to="/" />
               <div className="ix-footer__row">
