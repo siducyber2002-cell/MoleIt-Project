@@ -300,14 +300,17 @@ def _single_rotor(pos, adj, sym):
     heavy_b = [b for b in b_side if sym[b] != "H"]
     if len(heavy_a) == 1 and len(heavy_b) == 1:
         a, b = heavy_a[0], heavy_b[0]
-        phi = abs(dih(a, b))
-        detail = f"{sym[a]}\u2013{sym[x]}\u2013{sym[y]}\u2013{sym[b]} dihedral {phi:.0f}\u00b0"
+        signed = dih(a, b)
+        phi = abs(signed)
+        # +/- tells the two mirror-image twists apart (g+ / g-); PubChem lists both as separate conformers
+        sign = "+" if signed > 0 else "\u2212"
+        detail = f"{sym[a]}\u2013{sym[x]}\u2013{sym[y]}\u2013{sym[b]} dihedral {signed:+.0f}\u00b0"
         if phi >= 150:
             return {"name": "Anti (staggered)", "detail": detail}
         if phi >= 90:
-            return {"name": "Anticlinal (partly eclipsed)", "detail": detail}
+            return {"name": f"Anticlinal{sign} (partly eclipsed)", "detail": detail}
         if phi >= 30:
-            return {"name": "Gauche (staggered)", "detail": detail}
+            return {"name": f"Gauche{sign} (staggered)", "detail": detail}
         return {"name": "Syn (eclipsed)", "detail": detail}
     # general case: how far the two sets of substituents are from lining up
     t = min(abs(dih(a, b)) for a in a_side for b in b_side)
