@@ -841,11 +841,11 @@ export default function Home() {
           </div>
         </section>
 
-        {/* ── 08 / closing — where the road ends ── */}
-        <section className="ix-sec" id="start">
+        {/* ── 08 / About us — closing section, where the road ends ── */}
+        <section className="ix-sec" id="about">
           <div className="ix-grid">
             <div className="ix-grid__label">
-              <SectionLabel n={8}>Start</SectionLabel>
+              <SectionLabel n={8}>About us</SectionLabel>
             </div>
             <div className="min-w-0">
               <StaggerGroup amount={0.3} stagger={0.1}>
@@ -853,31 +853,35 @@ export default function Home() {
                   variants={{ hidden: {}, show: { transition: { staggerChildren: 0.05, delayChildren: 0.05 } } }}
                   className="ix-h2"
                 >
-                  <Words>Draw it. Understand it.</Words>{' '}
+                  <Words>Two college friends,</Words>{' '}
                   <Mark chip delay={0.2}>
-                    <InlineReveal>Explore it.</InlineReveal>
+                    <InlineReveal>one molecular lab.</InlineReveal>
                   </Mark>
                 </motion.h2>
-                <StaggerItem as="div" className="ix-actions mt-[clamp(22px,4vh,40px)]">
-                  <Link to="/draw" className="ix-btn">
-                    <FlaskConical size={19} /> Open Draw Lab
-                    <ArrowRight size={18} />
-                  </Link>
-                  <Link to="/library" className="ix-btn ix-btn--ghost">
-                    <BookOpen size={19} /> Browse Compounds
-                  </Link>
+                <StaggerItem as="p" className="ix-body mt-[clamp(18px,3vh,30px)]">
+                  This product is brought to you by <strong>Subhranil Manna</strong> and{' '}
+                  <strong>Siddhartha Dhar</strong>.
                 </StaggerItem>
               </StaggerGroup>
+
+              <Reveal amount={0.15} className="mt-[clamp(28px,5vh,52px)]">
+                <figure className="ix-about__photo">
+                  <img
+                    src="/about-us.jpg"
+                    alt="Subhranil Manna and Siddhartha Dhar"
+                    loading="lazy"
+                    onError={(e) => {
+                      e.currentTarget.closest('figure').style.display = 'none';
+                    }}
+                  />
+                </figure>
+              </Reveal>
             </div>
           </div>
 
           <div className="ix-finale__end">
             <div className="ix-run" data-road="run2" style={{ top: 0 }} />
             <div className="ix-endring" data-road="end" aria-hidden="true" />
-            <p className="ix-road-credit">
-              Developed and Designed by <strong>Siddhartha Dhar</strong> and{' '}
-              <strong>Subhranil Manna</strong>
-            </p>
             <footer className="ix-footer">
               <MoleItLogo size="sm" tone="light" to="/" />
               <div className="ix-footer__row">

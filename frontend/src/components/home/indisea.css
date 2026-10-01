@@ -1146,3 +1146,24 @@ html.ix-menu-cursor .ix-burger.is-open * {
     transition: none;
   }
 }
+
+/* ---------- about us (08) ---------- */
+.ix-body strong {
+  color: var(--ix-ink);
+  font-weight: 700;
+}
+.ix-about__photo {
+  margin: 0;
+  overflow: hidden;
+  border-radius: var(--ix-radius);
+  background: var(--ix-card);
+  max-width: 880px;
+}
+.ix-about__photo img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 560px;
+  object-fit: cover;
+  object-position: center 30%;
+}

@@ -24,6 +24,7 @@ from .. import symmetry_engine as engine
 from .. import symmetry_report as report_builder
 from .. import structure_builder
 from .. import conformer_naming
+from .. import conformer_search
 from ..exceptions import BadRequestError, UpstreamServiceError, UpstreamUnavailableError
 from ..logging_config import get_logger
 from ..net import DeadlineExceeded, run_with_deadline
@@ -62,55 +63,31 @@ _session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=20, po
 # instead of ploughing through the rest of its fallback chain on a network
 # path that already just failed.
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-_MAX_ATTEMPTS = 2            # for connection-level failures (dead network path: fail fast)
-_RETRY_BACKOFF_BASE = 0.4    # seconds
-
-# FIX (PubChem "HTTP 503 ServerBusy" surfacing as a hard 502 toast): a 503/429 from PubChem is
-# a *transient, reachable-server* condition -- it normally clears within a second or two -- and
-# is very different from a dead network path. The old code gave both the same single retry, so
-# one unlucky pair of 503s killed the whole lookup. Status-based retries now get their own,
-# larger budget (honouring Retry-After when PubChem sends it), while connection failures keep
-# the tight 2-attempt limit so an unreachable PubChem still fails fast. Worst case added delay
-# per call is ~4s, comfortably inside _PUBCHEM_DEADLINE_SECONDS.
-_MAX_STATUS_RETRIES = 4
-_STATUS_BACKOFF_BASE = 0.6   # 0.6s, 1.2s, 2.4s, 4.0s (capped)
-_STATUS_BACKOFF_CAP = 4.0
-
-
-def _status_retry_delay(resp, retry_index: int) -> float:
-    delay = min(_STATUS_BACKOFF_BASE * (2 ** retry_index), _STATUS_BACKOFF_CAP)
-    retry_after = resp.headers.get("Retry-After") if resp is not None else None
-    if retry_after:
-        try:
-            delay = max(delay, min(float(retry_after), _STATUS_BACKOFF_CAP))
-        except ValueError:
-            pass  # HTTP-date form of Retry-After: ignore, keep our own backoff
-    return delay
+_MAX_ATTEMPTS = 2
+_RETRY_BACKOFF_BASE = 0.4  # seconds
 
 
 def _get_with_retry(url, **kwargs):
-    """Shared GET helper for this router. Retries (a) connection-level failures once and
-    (b) transient HTTP statuses (429/5xx, notably PubChem's 503 "ServerBusy") a few times with
-    growing backoff. Raises UpstreamUnavailableError if PubChem could never be reached at all,
-    or returns the final `requests.Response` (which may still be a non-2xx -- the caller decides
-    what a *reachable* non-2xx response means). The loop is bounded: every iteration either
-    returns or consumes one unit of one of the two retry budgets."""
+    """Shared GET helper for this router: retries transient failures
+    (dropped connections, 429/5xx) once, with a short backoff, before
+    giving up. Raises UpstreamUnavailableError if PubChem could never be
+    reached at all, or returns the final `requests.Response` (which may
+    still be a real 4xx — the caller decides what a non-2xx *reachable*
+    response means)."""
     kwargs.setdefault("timeout", PUBCHEM_TIMEOUT)
-    net_failures = 0
-    status_retries = 0
-    while True:
+    last_exc = None
+    for attempt in range(_MAX_ATTEMPTS):
         t0 = time.monotonic()
-        attempt = net_failures + status_retries + 1
-        logger.info("_get_with_retry: GET %s (attempt %d) starting", url, attempt)
+        logger.info("_get_with_retry: GET %s (attempt %d/%d) starting", url, attempt + 1, _MAX_ATTEMPTS)
         try:
             resp = _session.get(url, **kwargs)
         except requests.RequestException as exc:
             logger.info(
                 "_get_with_retry: GET %s attempt %d raised %s after %.2fs",
-                url, attempt, type(exc).__name__, time.monotonic() - t0,
+                url, attempt + 1, type(exc).__name__, time.monotonic() - t0,
             )
-            net_failures += 1
-            if net_failures < _MAX_ATTEMPTS:
+            last_exc = exc
+            if attempt < _MAX_ATTEMPTS - 1:
                 time.sleep(_RETRY_BACKOFF_BASE)
                 continue
             raise UpstreamUnavailableError(
@@ -119,64 +96,13 @@ def _get_with_retry(url, **kwargs):
             )
         logger.info(
             "_get_with_retry: GET %s attempt %d got status=%s after %.2fs",
-            url, attempt, resp.status_code, time.monotonic() - t0,
+            url, attempt + 1, resp.status_code, time.monotonic() - t0,
         )
-        if resp.status_code in _RETRYABLE_STATUS and status_retries < _MAX_STATUS_RETRIES:
-            delay = _status_retry_delay(resp, status_retries)
-            status_retries += 1
-            logger.info("_get_with_retry: transient HTTP %s, retrying in %.1fs (%d/%d)",
-                        resp.status_code, delay, status_retries, _MAX_STATUS_RETRIES)
-            time.sleep(delay)
+        if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_ATTEMPTS - 1:
+            time.sleep(_RETRY_BACKOFF_BASE)
             continue
         return resp
-
-
-def _upstream_status_error(what: str, resp) -> Exception:
-    """Maps a final non-2xx PubChem response to the right exception: a transient status that
-    survived every retry means "PubChem is busy" (503, try again), not "PubChem sent unusable
-    data" (502)."""
-    if resp.status_code in _RETRYABLE_STATUS:
-        return UpstreamUnavailableError(
-            f"PubChem is busy right now ({what} returned HTTP {resp.status_code} after several "
-            "retries). Nothing is wrong with your input -- please try again in a moment."
-        )
-    return UpstreamServiceError(f"PubChem {what} failed (HTTP {resp.status_code}).")
-
-
-# Short-lived in-process cache of fetched SDF records, keyed by (cid, record_type). The search
-# step and the 3-D generation step both need the same 2-D record seconds apart, and a repeat
-# search for the same compound needs both again; without this each one is another chance for
-# PubChem to answer 503. A cached 404 (e.g. "no 3-D conformer on file") is stored as None so it
-# is not re-asked either. Transient failures are never cached.
-_SDF_CACHE_TTL_S = 15 * 60
-_SDF_CACHE_MAX = 256
-_sdf_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
-_sdf_cache_lock = threading.Lock()
-_CACHE_MISS = object()
-
-
-def _sdf_cache_get(cid: str, record_type: str):
-    key = (cid, record_type)
-    with _sdf_cache_lock:
-        hit = _sdf_cache.get(key)
-        if hit is None:
-            return _CACHE_MISS
-        expires, text = hit
-        if expires < time.monotonic():
-            _sdf_cache.pop(key, None)
-            return _CACHE_MISS
-        return text
-
-
-def _sdf_cache_put(cid: str, record_type: str, text: str | None) -> None:
-    with _sdf_cache_lock:
-        if len(_sdf_cache) >= _SDF_CACHE_MAX:
-            now = time.monotonic()
-            for k in [k for k, (exp, _) in _sdf_cache.items() if exp < now]:
-                _sdf_cache.pop(k, None)
-            while len(_sdf_cache) >= _SDF_CACHE_MAX:  # still full: drop oldest-expiring
-                _sdf_cache.pop(min(_sdf_cache, key=lambda k: _sdf_cache[k][0]), None)
-        _sdf_cache[(cid, record_type)] = (time.monotonic() + _SDF_CACHE_TTL_S, text)
+    raise UpstreamUnavailableError("Could not reach PubChem.") if last_exc else None
 
 
 
@@ -227,11 +153,6 @@ class ReportRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     cid: str = Field(..., min_length=1, max_length=20, pattern=r"^\d+$", description="PubChem CID to build a 3-D geometry for")
-    structure: str | None = Field(
-        None, max_length=500_000,
-        description="Optional: the 2-D SDF the search step already returned. When present it is used "
-                    "instead of downloading the same record from PubChem a second time.",
-    )
 
 
 class ConformerRequest(BaseModel):
@@ -395,6 +316,47 @@ def _fetch_conformer_ids(cid: str) -> list[str]:
         return []
 
 
+_CONFORMER_SEARCH_SECONDS = 20
+
+
+def _searched_conformer_options(sdf: str) -> tuple[str, list[dict]] | None:
+    """Works out the distinct conformers of an organic molecule itself (torsion scan incl. eclipsed /
+    syn transition states, ring shapes, or an ensemble) -- see conformer_search.py. Returns
+    (mode, options) or None when the molecule isn't covered or has only one shape."""
+    try:
+        found = run_with_deadline(conformer_search.find_conformers, sdf, timeout=_CONFORMER_SEARCH_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.info("Conformer search unavailable", exc_info=True)
+        return None
+    if not found:
+        return None
+    options = []
+    for i, c in enumerate(found["conformers"]):
+        opt = {"id": f"gen-{i}", "source": "generated", "structure": c["structure"],
+               "relEnergyKJ": c["relEnergyKJ"], "kind": c["kind"],
+               "label": f"Conformer {i + 1}" + (" (lowest energy)" if i == 0 else f" (+{c['relEnergyKJ']:.1f} kJ/mol)")}
+        if c.get("name"):
+            opt["name"] = c["name"]
+        if c.get("detail"):
+            opt["detail"] = c["detail"]
+        options.append(opt)
+    return found["mode"], options
+
+
+def _active_option_id(options: list[dict], current_name: str | None) -> str:
+    """The chip matching the shape that is currently on screen (falls back to the first)."""
+    if current_name:
+        minima = [o for o in options if o.get("kind") != "transition state"]
+        for o in minima:  # exact name first ("Chair (CH3 equatorial)"), then just the shape word
+            if o.get("name") == current_name:
+                return o["id"]
+        base = current_name.split(" (")[0]
+        for o in minima:
+            if o.get("name", "").split(" (")[0] == base:
+                return o["id"]
+    return options[0]["id"]
+
+
 def _pubchem_conformer_options(ids: list[str]) -> list[dict]:
     if len(ids) < 2:
         return []
@@ -410,7 +372,7 @@ def _fetch_conformer_sdf(conformer_id: str) -> str | None:
     if resp.status_code == 404:
         return None
     if not resp.ok:
-        raise _upstream_status_error("conformer lookup", resp)
+        raise UpstreamServiceError(f"PubChem conformer lookup failed (HTTP {resp.status_code}).")
     return resp.text.strip() or None
 
 
@@ -458,7 +420,13 @@ def fetch_pubchem_structure(payload: PubchemRequest):
         preview = _preview_from_structure(cid, sdf, quality, None, None, expected_formula)
         if quality == "3d":
             options = _pubchem_conformer_options(_fetch_conformer_ids(cid))
-            if options:
+            searched = _searched_conformer_options(sdf)
+            if searched and (searched[0] in ("scan", "ring") or not options):
+                # a full enumeration beats PubChem's short list of minima
+                options = searched[1]
+                preview["conformers"] = options
+                preview["activeConformerId"] = _active_option_id(options, preview.get("conformerName"))
+            elif options:
                 preview["conformers"] = options
                 preview["activeConformerId"] = options[0]["id"]
         else:
@@ -481,16 +449,7 @@ def generate_pubchem_3d(payload: GenerateRequest):
     cid = payload.cid
     logger.info("Symmetry PubChem generate3d requested | cid=%s", cid)
     try:
-        # The search step already downloaded this exact 2-D record. Re-downloading it was a pure
-        # extra failure point (PubChem answering 503 here killed the whole build), so use the copy
-        # the browser sends back. It is only trusted if it looks like a real molfile; identity is
-        # still enforced afterwards by _verify_structure against PubChem's own formula for the CID.
-        supplied = (payload.structure or "").strip()
-        if supplied and "M  END" in supplied and re.search(r"\bV2000\b", supplied):
-            sdf_2d = supplied
-            logger.info("Symmetry PubChem generate3d using client-supplied 2-D structure | cid=%s", cid)
-        else:
-            sdf_2d = run_with_deadline(_fetch_sdf, cid, "2d", timeout=_PUBCHEM_DEADLINE_SECONDS)
+        sdf_2d = run_with_deadline(_fetch_sdf, cid, "2d", timeout=_PUBCHEM_DEADLINE_SECONDS)
         if not sdf_2d:
             raise UpstreamServiceError(f"PubChem has no structure record at all for CID {cid}.")
         text, quality, note, warning, alternatives = _generate_with_alternatives(sdf_2d)
@@ -519,6 +478,11 @@ def generate_pubchem_3d(payload: GenerateRequest):
             if len(options) > 1:
                 preview["conformers"] = options
                 preview["activeConformerId"] = "gen-0"
+        if not preview.get("conformers") and not preview["analysisBlocked"]:
+            searched = _searched_conformer_options(sdf_2d)
+            if searched:
+                preview["conformers"] = searched[1]
+                preview["activeConformerId"] = _active_option_id(searched[1], preview.get("conformerName"))
         logger.info("Symmetry PubChem generate3d done | cid=%s quality=%s atoms=%d conformers=%d",
                     cid, quality, preview["atomCount"], len(alternatives))
         return ok(200, "Structure generated", preview=preview)
@@ -842,10 +806,7 @@ def _lookup_cid_exact(name: str) -> str | None:
     if resp.status_code == 404:
         return None
     if not resp.ok:
-        # Busy PubChem (503 after retries) -> UpstreamUnavailableError, which propagates out of
-        # _resolve_cid. Previously this became UpstreamServiceError, which _resolve_cid swallows,
-        # so a busy PubChem was misreported as "no compound exactly matches your query".
-        raise _upstream_status_error("name lookup", resp)
+        raise UpstreamServiceError(f"PubChem name lookup failed (HTTP {resp.status_code}).")
     cids = resp.json().get("IdentifierList", {}).get("CID", [])
     return str(cids[0]) if cids else None
 
@@ -956,19 +917,15 @@ def _fetch_sdf_with_fallback(cid: str) -> tuple[str, str]:
 
 def _fetch_sdf(cid: str, record_type: str) -> str | None:
     logger.info("_fetch_sdf: starting | cid=%s type=%s thread=%s", cid, record_type, threading.current_thread().name)
-    cached = _sdf_cache_get(cid, record_type)
-    if cached is not _CACHE_MISS:
-        logger.info("_fetch_sdf: cache hit | cid=%s type=%s has_record=%s", cid, record_type, cached is not None)
-        return cached
     url = f"{PUG_BASE}/compound/cid/{quote(cid)}/SDF"
     resp = _get_with_retry(url, params={"record_type": record_type})
     if resp.status_code == 404:
         logger.info("_fetch_sdf: 404 (no %s record) | cid=%s", record_type, cid)
-        _sdf_cache_put(cid, record_type, None)
         return None
     if not resp.ok:
-        raise _upstream_status_error(f"{record_type.upper()} structure lookup for CID {cid}", resp)
-    text = resp.text.strip() or None
-    logger.info("_fetch_sdf: done | cid=%s type=%s chars=%d", cid, record_type, len(text or ""))
-    _sdf_cache_put(cid, record_type, text)
-    return text
+        raise UpstreamServiceError(
+            f"PubChem {record_type.upper()} structure lookup failed for CID {cid} (HTTP {resp.status_code})."
+        )
+    text = resp.text.strip()
+    logger.info("_fetch_sdf: done | cid=%s type=%s chars=%d", cid, record_type, len(text))
+    return text or None
